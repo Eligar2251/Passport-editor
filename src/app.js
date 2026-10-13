@@ -21,8 +21,27 @@ const PX_PER_MM = 96 / 25.4;  // 1 мм = 3.7795 px (CSS-пиксель)
 const MM_PER_PX = 25.4 / 96;
 
 const SNAP_THRESHOLD = 6;     // дистанция прилипания, px
-const MIN_SIZE = 10;          // минимальный размер элемента, px
+const MIN_SIZE = 10;          // минимальный размер текстового блока/картинки, px
+const MIN_LINE = 0.5;         // минимальная толщина линии, px
 const PDF_DENSITY = 3;        // 3 × 96 dpi ≈ 288 dpi для растрового PDF
+
+/* Режимы наложения слоя (CSS mix-blend-mode) */
+const BLEND_MODES = [
+  { id: 'normal', label: 'Обычный' },
+  { id: 'multiply', label: 'Умножение' },
+  { id: 'darken', label: 'Затемнение' },
+  { id: 'screen', label: 'Осветление' },
+  { id: 'overlay', label: 'Перекрытие' },
+  { id: 'soft-light', label: 'Мягкий свет' },
+  { id: 'color-burn', label: 'Затемнение основы' },
+  { id: 'difference', label: 'Разница' },
+];
+
+/** Минимальный размер зависит от типа: линию можно сделать тоньше 10 px. */
+const minSizeFor = (el) => (el && (el.type === 'rect' || el.type === 'field') ? MIN_LINE : MIN_SIZE);
+
+const TYPE_ICONS = { text: 'T', field: '✎', rect: '—', image: '🖼' };
+const blendLabel = (id) => (BLEND_MODES.find((m) => m.id === id) || {}).label || id;
 
 const PAPER_SIZES = {
   A4: { w: 210, h: 297, label: 'A4 · 210×297 мм' },
@@ -87,6 +106,7 @@ function createTextElement(overrides = {}) {
     x: 50, y: 50, width: 200, height: 24,
     locked: false,
     visible: true,
+    blendMode: 'normal',
     name: 'Текст',
     text: 'Новый текст',
     fontSize: 13,
@@ -108,6 +128,7 @@ function createImageElement(src, overrides = {}) {
     x: 50, y: 50, width: 150, height: 150,
     locked: false,
     visible: true,
+    blendMode: 'normal',
     name: 'Изображение',
     src,
     ...overrides,
@@ -121,8 +142,35 @@ function createLineElement(overrides = {}) {
     x: 50, y: 50, width: 150, height: 2,
     locked: false,
     visible: true,
+    blendMode: 'normal',
     name: 'Линия',
     background: '#000000',
+    ...overrides,
+  };
+}
+
+/** Поле для ввода текста (бланк с подчёркиванием) — туда вписываются данные. */
+function createFieldElement(overrides = {}) {
+  return {
+    id: genId(),
+    type: 'field',
+    x: 50, y: 50, width: 220, height: 18,
+    locked: false,
+    visible: true,
+    blendMode: 'normal',
+    name: 'Поле ввода',
+    value: '',
+    placeholder: 'Введите текст',
+    fontSize: 12,
+    fontWeight: 'normal',
+    fontStyle: 'normal',
+    color: '#000000',
+    textAlign: 'left',
+    fontFamily: 'Arial, sans-serif',
+    lineHeight: 1.2,
+    underline: true,
+    underlineColor: '#000000',
+    underlineWidth: 1,
     ...overrides,
   };
 }
@@ -140,46 +188,47 @@ function buildInitialElements() {
   add(createTextElement({ x: 500, y: 20, width: 90, height: 50, text: 'EAC', fontSize: 32, fontWeight: 'bold', textAlign: 'center', name: 'Логотип EAC' }));
 
   add(createTextElement({ x: 60, y: 135, width: 160, height: 22, text: 'ПАСПОРТ №', fontSize: 15, fontWeight: 'bold', name: 'Паспорт №' }));
-  add(createLineElement({ x: 190, y: 155, width: 250, height: 1, name: 'Линия паспорт №' }));
+  add(createFieldElement({ x: 190, y: 138, width: 250, height: 18, fontSize: 14, placeholder: 'номер паспорта', name: 'Поле: паспорт №' }));
 
   add(createTextElement({ x: 60, y: 175, width: 400, height: 20, text: 'Продукция из гофрированного картона', fontSize: 13, name: 'Продукция' }));
-  add(createTextElement({ x: 420, y: 208, width: 170, height: 18, text: 'Дата 08.06.25', fontSize: 12, textDecoration: 'underline', name: 'Дата' }));
+  add(createTextElement({ x: 420, y: 208, width: 42, height: 18, text: 'Дата', fontSize: 12, name: 'Дата: подпись' }));
+  add(createFieldElement({ x: 464, y: 208, width: 126, height: 18, fontSize: 12, value: '08.06.25', placeholder: 'дд.мм.гг', name: 'Поле: дата' }));
 
   const fy = 248;
   add(createTextElement({ x: 60, y: fy, width: 150, height: 16, text: 'Исполнение', fontSize: 12, name: 'Исполнение' }));
-  add(createLineElement({ x: 165, y: fy + 14, width: 425, height: 1, name: 'Линия Исполнение' }));
+  add(createFieldElement({ x: 165, y: fy, width: 425, height: 15, fontSize: 12, placeholder: 'исполнение', name: 'Поле: исполнение' }));
 
   add(createTextElement({ x: 60, y: fy + 22, width: 150, height: 16, text: 'Наименование', fontSize: 12, name: 'Наименование' }));
-  add(createLineElement({ x: 175, y: fy + 36, width: 415, height: 1, name: 'Линия Наименование' }));
+  add(createFieldElement({ x: 175, y: fy + 22, width: 415, height: 15, fontSize: 12, placeholder: 'наименование', name: 'Поле: наименование' }));
 
   add(createTextElement({ x: 60, y: fy + 44, width: 100, height: 16, text: 'Размеры', fontSize: 12, name: 'Размеры' }));
-  add(createLineElement({ x: 140, y: fy + 58, width: 450, height: 1, name: 'Линия Размеры' }));
+  add(createFieldElement({ x: 140, y: fy + 44, width: 450, height: 15, fontSize: 12, placeholder: 'размеры', name: 'Поле: размеры' }));
 
   add(createTextElement({ x: 60, y: fy + 66, width: 150, height: 16, text: 'Номер партии', fontSize: 12, name: 'Номер партии' }));
   add(createTextElement({ x: 240, y: fy + 66, width: 80, height: 16, text: 'Кол-во', fontSize: 12, name: 'Кол-во' }));
-  add(createLineElement({ x: 155, y: fy + 80, width: 75, height: 1, name: 'Линия партии' }));
-  add(createLineElement({ x: 290, y: fy + 80, width: 100, height: 1, name: 'Линия кол-во' }));
+  add(createFieldElement({ x: 155, y: fy + 66, width: 75, height: 15, fontSize: 12, placeholder: 'партия', name: 'Поле: номер партии' }));
+  add(createFieldElement({ x: 290, y: fy + 66, width: 100, height: 15, fontSize: 12, placeholder: 'кол-во', name: 'Поле: количество' }));
 
   add(createTextElement({ x: 60, y: fy + 108, width: 530, height: 20, text: 'Показатели качества:', fontSize: 13, fontWeight: 'bold', textAlign: 'center', name: 'Показатели качества' }));
 
   const qy = fy + 140;
   add(createTextElement({ x: 60, y: qy, width: 120, height: 32, text: 'Двойной перегиб', fontSize: 12, name: 'Двойной перегиб' }));
-  add(createTextElement({ x: 150, y: qy + 14, width: 220, height: 16, text: 'СООТВЕТСТВУЕТ', fontSize: 12, textDecoration: 'underline', name: 'Соответствует 1' }));
+  add(createFieldElement({ x: 150, y: qy + 14, width: 220, height: 16, fontSize: 12, value: 'СООТВЕТСТВУЕТ', name: 'Поле: соответствует 1' }));
 
   add(createTextElement({ x: 60, y: qy + 48, width: 260, height: 16, text: 'Сопротивление сжатию', fontSize: 12, name: 'Сопротивление сжатию' }));
-  add(createTextElement({ x: 240, y: qy + 48, width: 220, height: 16, text: 'СООТВЕТСТВУЕТ', fontSize: 12, textDecoration: 'underline', name: 'Соответствует 2' }));
+  add(createFieldElement({ x: 240, y: qy + 48, width: 220, height: 16, fontSize: 12, value: 'СООТВЕТСТВУЕТ', name: 'Поле: соответствует 2' }));
 
   add(createTextElement({ x: 60, y: qy + 78, width: 260, height: 32, text: 'Сопротивление горизонтальному удару', fontSize: 12, name: 'Горизонтальный удар' }));
-  add(createTextElement({ x: 170, y: qy + 108, width: 220, height: 16, text: 'СООТВЕТСТВУЕТ', fontSize: 12, textDecoration: 'underline', name: 'Соответствует 3' }));
+  add(createFieldElement({ x: 170, y: qy + 108, width: 220, height: 16, fontSize: 12, value: 'СООТВЕТСТВУЕТ', name: 'Поле: соответствует 3' }));
 
   add(createTextElement({ x: 60, y: qy + 138, width: 260, height: 32, text: 'Прочность при штабелировании', fontSize: 12, name: 'Штабелирование' }));
-  add(createTextElement({ x: 170, y: qy + 154, width: 220, height: 16, text: 'СООТВЕТСТВУЕТ', fontSize: 12, textDecoration: 'underline', name: 'Соответствует 4' }));
+  add(createFieldElement({ x: 170, y: qy + 154, width: 220, height: 16, fontSize: 12, value: 'СООТВЕТСТВУЕТ', name: 'Поле: соответствует 4' }));
 
   add(createTextElement({ x: 60, y: qy + 184, width: 330, height: 16, text: 'Сопротивление ударам при своб. падении', fontSize: 12, name: 'Своб. падение' }));
-  add(createTextElement({ x: 390, y: qy + 184, width: 180, height: 16, text: 'СООТВЕТСТВУЕТ', fontSize: 12, textDecoration: 'underline', name: 'Соответствует 5' }));
+  add(createFieldElement({ x: 390, y: qy + 184, width: 180, height: 16, fontSize: 12, value: 'СООТВЕТСТВУЕТ', name: 'Поле: соответствует 5' }));
 
   add(createTextElement({ x: 60, y: qy + 216, width: 80, height: 16, text: 'ГОСТ', fontSize: 12, name: 'ГОСТ' }));
-  add(createTextElement({ x: 160, y: qy + 216, width: 150, height: 16, text: '34033-2016', fontSize: 12, textDecoration: 'underline', textAlign: 'center', name: 'ГОСТ номер' }));
+  add(createFieldElement({ x: 160, y: qy + 216, width: 150, height: 16, fontSize: 12, value: '34033-2016', textAlign: 'center', placeholder: 'номер ГОСТ', name: 'Поле: номер ГОСТ' }));
 
   add(createTextElement({ x: 150, y: qy + 254, width: 250, height: 18, text: 'Контролер ОТК', fontSize: 12, textAlign: 'center', name: 'Контролер ОТК' }));
 
@@ -222,16 +271,18 @@ function historyReducer(state, action) {
 }
 
 /* ===================== Геометрия: resize ===================== */
-function computeResize(handle, orig, dx, dy) {
+/** min — минимальный размер: у линий и полей ввода он меньше (MIN_LINE),
+ *  иначе толщину линии нельзя было сделать меньше 10 px. */
+function computeResize(handle, orig, dx, dy, min = MIN_SIZE) {
   let { x, y, width, height } = orig;
-  if (handle.includes('e')) width = Math.max(MIN_SIZE, orig.width + dx);
-  if (handle.includes('s')) height = Math.max(MIN_SIZE, orig.height + dy);
+  if (handle.includes('e')) width = Math.max(min, orig.width + dx);
+  if (handle.includes('s')) height = Math.max(min, orig.height + dy);
   if (handle.includes('w')) {
-    width = Math.max(MIN_SIZE, orig.width - dx);
+    width = Math.max(min, orig.width - dx);
     x = orig.x + (orig.width - width);
   }
   if (handle.includes('n')) {
-    height = Math.max(MIN_SIZE, orig.height - dy);
+    height = Math.max(min, orig.height - dy);
     y = orig.y + (orig.height - height);
   }
   return { x, y, width, height };
@@ -313,42 +364,42 @@ function calculateSnapping(draggingEl, rawX, rawY, allElements, threshold = SNAP
 }
 
 /* Прилипание движущихся граней при масштабировании */
-function computeResizeSnapped(handle, orig, dx, dy, allElements, skipId, threshold = SNAP_THRESHOLD) {
-  const box = computeResize(handle, orig, dx, dy);
+function computeResizeSnapped(handle, orig, dx, dy, allElements, skipId, threshold = SNAP_THRESHOLD, min = MIN_SIZE) {
+  const box = computeResize(handle, orig, dx, dy, min);
   const targets = buildTargetLines(allElements, skipId);
   let guideX = null;
   let guideY = null;
 
+  // Прилипание принимаем, только если оно не «схлопывает» элемент
+  // (иначе тонкая линия у края листа могла превратиться в 0.5 px).
   if (handle.includes('e')) {
     const t = nearestLine(targets.x, box.x + box.width, threshold);
-    if (t !== null) {
-      box.width = Math.max(MIN_SIZE, t - box.x);
+    if (t !== null && t - box.x >= min) {
+      box.width = t - box.x;
       guideX = t;
     }
   } else if (handle.includes('w')) {
     const right = orig.x + orig.width;
     const t = nearestLine(targets.x, box.x, threshold);
-    if (t !== null) {
-      const w = Math.max(MIN_SIZE, right - t);
-      box.x = right - w;
-      box.width = w;
+    if (t !== null && right - t >= min) {
+      box.width = right - t;
+      box.x = t;
       guideX = t;
     }
   }
 
   if (handle.includes('s')) {
     const t = nearestLine(targets.y, box.y + box.height, threshold);
-    if (t !== null) {
-      box.height = Math.max(MIN_SIZE, t - box.y);
+    if (t !== null && t - box.y >= min) {
+      box.height = t - box.y;
       guideY = t;
     }
   } else if (handle.includes('n')) {
     const bottom = orig.y + orig.height;
     const t = nearestLine(targets.y, box.y, threshold);
-    if (t !== null) {
-      const h = Math.max(MIN_SIZE, bottom - t);
-      box.y = bottom - h;
-      box.height = h;
+    if (t !== null && bottom - t >= min) {
+      box.height = bottom - t;
+      box.y = t;
       guideY = t;
     }
   }
@@ -520,7 +571,8 @@ function computePrintLayout(settings) {
 
 /* ===================== Общие куски рендера ===================== */
 /** Содержимое элемента (текст / картинка / линия). kf — коэффициент для шрифта. */
-function ElementInner({ el, kf = 1, editing = false, innerRef = null, onBlur = null }) {
+/** kf — коэффициент масштаба для шрифта (печать/PDF), showPlaceholder — только для экрана. */
+function ElementInner({ el, kf = 1, editing = false, innerRef = null, onBlur = null, onKeyDown = null, showPlaceholder = false }) {
   if (el.type === 'text') {
     return (
       <div
@@ -545,6 +597,37 @@ function ElementInner({ el, kf = 1, editing = false, innerRef = null, onBlur = n
       </div>
     );
   }
+  if (el.type === 'field') {
+    const value = el.value || '';
+    const empty = value.length === 0;
+    const underline = el.underline !== false;
+    return (
+      <div
+        ref={innerRef}
+        contentEditable={editing}
+        suppressContentEditableWarning
+        onBlur={onBlur}
+        onKeyDown={onKeyDown}
+        className={`pe-field-content${empty && !editing ? ' is-empty' : ''}${editing ? ' is-editing' : ''}`}
+        data-placeholder={showPlaceholder && empty ? (el.placeholder || 'Введите текст') : undefined}
+        style={{
+          fontSize: el.fontSize * kf,
+          fontWeight: el.fontWeight,
+          fontStyle: el.fontStyle,
+          color: el.color,
+          textAlign: el.textAlign,
+          fontFamily: el.fontFamily,
+          lineHeight: el.lineHeight,
+          borderBottom: underline
+            ? `${Math.max(0.25, (el.underlineWidth || 1) * kf)}px solid ${el.underlineColor || '#000000'}`
+            : 'none',
+          userSelect: editing ? 'text' : 'none',
+        }}
+      >
+        {empty ? null : value}
+      </div>
+    );
+  }
   if (el.type === 'image') {
     return <img src={el.src} alt="" draggable={false} className="pe-image-content" />;
   }
@@ -554,6 +637,7 @@ function ElementInner({ el, kf = 1, editing = false, innerRef = null, onBlur = n
 /** «Чистый» элемент для печати/PDF — без рамок выделения и маркеров. */
 function PrintElement({ el, z, kx, ky, kf }) {
   if (el.visible === false) return null;
+  const blend = el.blendMode && el.blendMode !== 'normal' ? el.blendMode : undefined;
   return (
     <div
       className="pe-print-el"
@@ -563,6 +647,7 @@ function PrintElement({ el, z, kx, ky, kf }) {
         width: Math.max(0.01, el.width * kx),
         height: Math.max(0.01, el.height * ky),
         zIndex: z,
+        mixBlendMode: blend,
       }}
     >
       <ElementInner el={el} kf={kf} />
@@ -735,7 +820,13 @@ function LayersPanel({ elements, selectedId, onSelect, onToggleVisible, onToggle
             <button className="pe-icon-btn" title="Блокировка" onClick={(e) => { e.stopPropagation(); onToggleLock(el); }}>
               {el.locked ? '🔒' : '🔓'}
             </button>
-            <span className="pe-layer-name" title={el.name || el.type}>{el.name || el.type}</span>
+            <span className="pe-layer-name" title={el.name || el.type}>
+              <span className="pe-layer-type">{TYPE_ICONS[el.type] || '•'}</span>
+              {el.name || el.type}
+            </span>
+            {el.blendMode && el.blendMode !== 'normal' && (
+              <span className="pe-layer-badge" title={`Наложение: ${blendLabel(el.blendMode)}`}>{blendLabel(el.blendMode)}</span>
+            )}
             <button className="pe-icon-btn" title="Выше" onClick={(e) => { e.stopPropagation(); onMove(el.id, 'up'); }}>↑</button>
             <button className="pe-icon-btn" title="Ниже" onClick={(e) => { e.stopPropagation(); onMove(el.id, 'down'); }}>↓</button>
             <button className="pe-icon-btn pe-danger" title="Удалить" onClick={(e) => { e.stopPropagation(); onRemove(el.id); }}>✕</button>
@@ -754,7 +845,7 @@ function PropsPanel({ el, onLive, onCommit, onSessionStart, onSessionEnd, onDupl
         <h3>Свойства</h3>
         <p className="pe-hint">Выберите элемент на холсте.</p>
         <ul className="pe-hint-list">
-          <li>Двойной клик по тексту — редактирование</li>
+          <li>Двойной клик по тексту или полю — редактирование</li>
           <li>Стрелки — сдвиг на 1 px, Shift+стрелки — на 10 px</li>
           <li>Alt — отступы до соседних элементов</li>
           <li>Ctrl — временно отключить прилипание</li>
@@ -774,8 +865,8 @@ function PropsPanel({ el, onLive, onCommit, onSessionStart, onSessionEnd, onDupl
       <div className="pe-grid2">
         <NumberField label="X" value={el.x} onLive={(n) => onLive({ x: n })} onSessionStart={onSessionStart} onSessionEnd={onSessionEnd} suffix="px" />
         <NumberField label="Y" value={el.y} onLive={(n) => onLive({ y: n })} onSessionStart={onSessionStart} onSessionEnd={onSessionEnd} suffix="px" />
-        <NumberField label="Ш" value={el.width} min={MIN_SIZE} onLive={(n) => onLive({ width: n })} onSessionStart={onSessionStart} onSessionEnd={onSessionEnd} suffix="px" />
-        <NumberField label="В" value={el.height} min={MIN_SIZE} onLive={(n) => onLive({ height: n })} onSessionStart={onSessionStart} onSessionEnd={onSessionEnd} suffix="px" />
+        <NumberField label="Ш" value={el.width} min={minSizeFor(el)} onLive={(n) => onLive({ width: n })} onSessionStart={onSessionStart} onSessionEnd={onSessionEnd} suffix="px" />
+        <NumberField label={el.type === 'rect' ? 'Толщ.' : 'В'} value={el.height} min={minSizeFor(el)} step={el.type === 'rect' ? 0.5 : 1} onLive={(n) => onLive({ height: n })} onSessionStart={onSessionStart} onSessionEnd={onSessionEnd} suffix="px" />
       </div>
 
       <h4>Отступы от края листа</h4>
@@ -816,9 +907,110 @@ function PropsPanel({ el, onLive, onCommit, onSessionStart, onSessionEnd, onDupl
       {el.type === 'rect' && (
         <>
           <h4>Линия</h4>
+          <NumberField
+            label="Толщина линии"
+            value={el.height}
+            min={MIN_LINE}
+            step={0.5}
+            onLive={(n) => onLive({ height: n })}
+            onSessionStart={onSessionStart}
+            onSessionEnd={onSessionEnd}
+            suffix="px"
+          />
+          <div className="pe-btn-group">
+            {[0.5, 1, 2, 3, 5].map((t) => (
+              <button
+                key={t}
+                className={Math.abs(el.height - t) < 0.01 ? 'active' : ''}
+                title={`Толщина ${t} px`}
+                onClick={() => onCommit({ height: t })}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <NumberField
+            label="Длина линии"
+            value={el.width}
+            min={MIN_LINE}
+            onLive={(n) => onLive({ width: n })}
+            onSessionStart={onSessionStart}
+            onSessionEnd={onSessionEnd}
+            suffix="px"
+          />
           <ColorField label="Цвет" value={el.background} onLive={(v) => onLive({ background: v })} onSessionStart={onSessionStart} onSessionEnd={onSessionEnd} />
+          <p className="pe-hint">Толщину можно менять и мышью: тяните верхний или нижний маркер линии.</p>
         </>
       )}
+
+      {el.type === 'field' && (
+        <>
+          <h4>Поле ввода</h4>
+          <label className="pe-field pe-field-text">
+            <span>Значение (то, что попадёт в печать)</span>
+            <input
+              type="text"
+              value={el.value || ''}
+              placeholder={el.placeholder || ''}
+              onFocus={() => onSessionStart && onSessionStart()}
+              onChange={(e) => onLive({ value: e.currentTarget.value })}
+              onBlur={() => onSessionEnd && onSessionEnd()}
+            />
+          </label>
+          <label className="pe-field pe-field-text">
+            <span>Подсказка (видна только на экране)</span>
+            <input
+              type="text"
+              value={el.placeholder || ''}
+              onFocus={() => onSessionStart && onSessionStart()}
+              onChange={(e) => onLive({ placeholder: e.currentTarget.value })}
+              onBlur={() => onSessionEnd && onSessionEnd()}
+            />
+          </label>
+          <NumberField label="Размер шрифта" value={el.fontSize} min={4} max={200} onLive={(n) => onLive({ fontSize: n })} onSessionStart={onSessionStart} onSessionEnd={onSessionEnd} suffix="px" />
+          <ColorField label="Цвет текста" value={el.color} onLive={(v) => onLive({ color: v })} onSessionStart={onSessionStart} onSessionEnd={onSessionEnd} />
+          <div className="pe-btn-group">
+            <button className={el.fontWeight === 'bold' ? 'active' : ''} title="Жирный" onClick={() => onCommit({ fontWeight: el.fontWeight === 'bold' ? 'normal' : 'bold' })}><b>Ж</b></button>
+            <button className={el.fontStyle === 'italic' ? 'active' : ''} title="Курсив" onClick={() => onCommit({ fontStyle: el.fontStyle === 'italic' ? 'normal' : 'italic' })}><i>К</i></button>
+          </div>
+          <div className="pe-btn-group">
+            <button className={el.textAlign === 'left' ? 'active' : ''} title="По левому краю" onClick={() => onCommit({ textAlign: 'left' })}>⇤</button>
+            <button className={el.textAlign === 'center' ? 'active' : ''} title="По центру" onClick={() => onCommit({ textAlign: 'center' })}>↔</button>
+            <button className={el.textAlign === 'right' ? 'active' : ''} title="По правому краю" onClick={() => onCommit({ textAlign: 'right' })}>⇥</button>
+          </div>
+          <label className="pe-checkbox">
+            <input type="checkbox" checked={el.underline !== false} onChange={(e) => onCommit({ underline: e.currentTarget.checked })} />
+            Линия под полем
+          </label>
+          {el.underline !== false && (
+            <>
+              <NumberField
+                label="Толщина подчёркивания"
+                value={el.underlineWidth === undefined ? 1 : el.underlineWidth}
+                min={MIN_LINE}
+                step={0.5}
+                onLive={(n) => onLive({ underlineWidth: n })}
+                onSessionStart={onSessionStart}
+                onSessionEnd={onSessionEnd}
+                suffix="px"
+              />
+              <ColorField label="Цвет подчёркивания" value={el.underlineColor || '#000000'} onLive={(v) => onLive({ underlineColor: v })} onSessionStart={onSessionStart} onSessionEnd={onSessionEnd} />
+            </>
+          )}
+          <p className="pe-hint">Двойной клик по полю на холсте — ввести текст; Enter — сохранить.</p>
+        </>
+      )}
+
+      <h4>Наложение слоя</h4>
+      <label className="pe-field">
+        <span>Режим смешивания</span>
+        <select value={el.blendMode || 'normal'} onChange={(e) => onCommit({ blendMode: e.currentTarget.value })}>
+          {BLEND_MODES.map((mode) => (
+            <option key={mode.id} value={mode.id}>{mode.label}</option>
+          ))}
+        </select>
+      </label>
+      <p className="pe-hint">«Умножение» удобно для печатей, штампов и подписей поверх текста.</p>
 
       <h4>Слой</h4>
       <label className="pe-field pe-field-text">
@@ -845,6 +1037,7 @@ function PropsPanel({ el, onLive, onCommit, onSessionStart, onSessionEnd, onDupl
 /* ===================== Диалог печати ===================== */
 function PrintDialog({ settings, onChange, elements, onClose, onPrint, onPdf, busy }) {
   const L = computePrintLayout(settings);
+  const blendCount = elements.filter((el) => el.blendMode && el.blendMode !== 'normal').length;
   const pageWpx = L.pageWmm * PX_PER_MM;
   const pageHpx = L.pageHmm * PX_PER_MM;
   const boxRef = useRef(null);
@@ -943,6 +1136,13 @@ function PrintDialog({ settings, onChange, elements, onClose, onPrint, onPdf, bu
 
             {L.overflow && (
               <p className="pe-warn">Документ больше области печати — края будут обрезаны. Уменьшите масштаб или поля.</p>
+            )}
+            {blendCount > 0 && (
+              <p className="pe-warn">
+                Слоёв с наложением (не «Обычный»): {blendCount}. «Печать» сохранит эффект,
+                а PDF собирается через html2canvas, который не поддерживает mix-blend-mode —
+                в PDF такие слои будут как обычные.
+              </p>
             )}
             <p className="pe-hint">
               В диалоге печати браузера укажите: поля — «Нет», масштаб — 100 %, иначе лист может съехать.
@@ -1057,20 +1257,44 @@ export default function PassportEditor() {
 
   /* ---------- Редактирование текста ---------- */
   function startEditing(el) {
-    if (el.locked || el.type !== 'text') return;
+    if (el.locked || (el.type !== 'text' && el.type !== 'field')) return;
     setEditingId(el.id);
   }
 
   function commitEditing() {
     const id = editingIdRef.current;
     if (id && editingRef.current) {
-      const newText = editingRef.current.innerText;
+      const node = editingRef.current;
+      // innerText корректно переносит переносы строк; textContent — запасной вариант
+      const raw = typeof node.innerText === 'string' ? node.innerText : (node.textContent || '');
       const current = elementsRef.current.find((e) => e.id === id);
-      if (current && current.text !== newText) {
-        commitElements(elementsRef.current.map((e) => (e.id === id ? { ...e, text: newText } : e)));
+      if (current) {
+        if (current.type === 'field') {
+          // Поле ввода однострочное: переносы заменяем пробелами
+          const newValue = raw.replace(/[\r\n]+/g, ' ').trim();
+          if (newValue !== (current.value || '')) {
+            commitElements(elementsRef.current.map((e) => (e.id === id ? { ...e, value: newValue } : e)));
+          }
+        } else {
+          const newText = raw;
+          if (newText !== current.text) {
+            commitElements(elementsRef.current.map((e) => (e.id === id ? { ...e, text: newText } : e)));
+          }
+        }
       }
     }
     setEditingId(null);
+  }
+
+  /** Enter в поле ввода — сохранить значение и выйти из режима редактирования. */
+  function handleEditorKeyDown(e) {
+    const el = elementsRef.current.find((item) => item.id === editingIdRef.current);
+    if (el && el.type === 'field' && e.key === 'Enter') {
+      e.preventDefault();
+      e.currentTarget.blur();
+      return;
+    }
+    e.stopPropagation();
   }
 
   useEffect(() => {
@@ -1155,13 +1379,14 @@ export default function PassportEditor() {
         let box;
         let gx = null;
         let gy = null;
+        const min = minSizeFor(currentEl);
         if (snapOn) {
-          const res = computeResizeSnapped(d.handle, d.orig, dx, dy, elementsRef.current, d.id);
+          const res = computeResizeSnapped(d.handle, d.orig, dx, dy, elementsRef.current, d.id, SNAP_THRESHOLD, min);
           box = res.box;
           gx = res.guideX;
           gy = res.guideY;
         } else {
-          box = computeResize(d.handle, d.orig, dx, dy);
+          box = computeResize(d.handle, d.orig, dx, dy, min);
         }
         setGuides({ x: gx, y: gy });
         setBadge({ text: `${round(box.width)} × ${round(box.height)}`, x: box.x + box.width + 10, y: box.y + box.height + 10 });
@@ -1204,6 +1429,13 @@ export default function PassportEditor() {
     const el = createLineElement({ x: 120, y: 120 });
     commitElements([...elementsRef.current, el]);
     setSelectedId(el.id);
+  }
+
+  function addField() {
+    const el = createFieldElement({ x: 120, y: 120 });
+    commitElements([...elementsRef.current, el]);
+    setSelectedId(el.id);
+    setEditingId(el.id);
   }
 
   function handleImageFile(e) {
@@ -1456,6 +1688,14 @@ export default function PassportEditor() {
         deleteSelected();
         return;
       }
+      if (key === 'Enter' && selectedIdRef.current && !editingIdRef.current) {
+        const el = elementsRef.current.find((item) => item.id === selectedIdRef.current);
+        if (el && (el.type === 'text' || el.type === 'field') && !el.locked) {
+          e.preventDefault();
+          startEditing(el);
+          return;
+        }
+      }
       const steps = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
       if (steps[key] && selectedIdRef.current) {
         e.preventDefault();
@@ -1511,6 +1751,7 @@ export default function PassportEditor() {
           <div className="pe-brand">Паспорт</div>
           <button onClick={addText}>+ Текст</button>
           <button onClick={addLine}>+ Линия</button>
+          <button onClick={addField} title="Поле для ввода текста (бланк с подчёркиванием)">+ Поле</button>
           <button onClick={() => fileInputRef.current.click()}>+ Фото</button>
           <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleImageFile} />
           <span className="pe-sep" />
@@ -1575,10 +1816,11 @@ export default function PassportEditor() {
                   const isSelected = selectedId === el.id;
                   const isEditing = editingId === el.id;
                   const isHovered = altDown && hoverId === el.id && !isSelected;
+                  const blend = el.blendMode && el.blendMode !== 'normal' ? el.blendMode : undefined;
                   return (
                     <div
                       key={el.id}
-                      className={`pe-element${isSelected ? ' selected' : ''}${el.locked ? ' locked' : ''}${isHovered ? ' hovered' : ''}`}
+                      className={`pe-element pe-element--${el.type}${isSelected ? ' selected' : ''}${el.locked ? ' locked' : ''}${isHovered ? ' hovered' : ''}`}
                       style={{
                         left: el.x,
                         top: el.y,
@@ -1587,6 +1829,7 @@ export default function PassportEditor() {
                         zIndex: idx + 1,
                         display: el.visible === false ? 'none' : 'block',
                         cursor: el.locked ? 'not-allowed' : isEditing ? 'text' : 'move',
+                        mixBlendMode: blend,
                       }}
                       onMouseDown={(e) => handleElementMouseDown(e, el)}
                       onDoubleClick={(e) => {
@@ -1601,6 +1844,8 @@ export default function PassportEditor() {
                         editing={isEditing}
                         innerRef={isEditing ? editingRef : null}
                         onBlur={isEditing ? commitEditing : undefined}
+                        onKeyDown={isEditing ? handleEditorKeyDown : undefined}
+                        showPlaceholder
                       />
 
                       {isSelected && !el.locked && HANDLES.map((h) => (
@@ -1704,6 +1949,8 @@ body { margin: 0; }
 .pe-layer-row:hover { background: #e8e8e8; }
 .pe-layer-row.selected { background: #cfe4ff; }
 .pe-layer-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 4px; }
+.pe-layer-type { display: inline-block; width: 14px; color: #999; font-size: 11px; text-align: center; }
+.pe-layer-badge { font-size: 9px; color: #7b5cd6; background: #efeaff; border-radius: 3px; padding: 1px 4px; flex-shrink: 0; max-width: 74px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pe-icon-btn { background: none; border: none; cursor: pointer; font-size: 12px; padding: 2px 4px; color: #444; }
 .pe-icon-btn:hover { color: #000; }
 .pe-icon-btn.pe-danger:hover { color: #c0392b; }
@@ -1713,7 +1960,7 @@ body { margin: 0; }
 .pe-canvas-inner { display: flex; flex-direction: column; gap: 8px; align-items: center; margin: auto; }
 .pe-artboard-caption { display: flex; gap: 14px; font-size: 11px; color: #eaeaea; align-items: baseline; }
 .pe-artboard-caption .pe-muted { color: #cfcfcf; }
-.pe-artboard { position: relative; background: #fff; box-shadow: 0 2px 18px rgba(0,0,0,.45); flex-shrink: 0; }
+.pe-artboard { position: relative; background: #fff; box-shadow: 0 2px 18px rgba(0,0,0,.45); flex-shrink: 0; isolation: isolate; }
 
 .pe-element { position: absolute; }
 .pe-element.selected { box-shadow: 0 0 0 1px #2d8cf0; }
@@ -1721,6 +1968,18 @@ body { margin: 0; }
 .pe-element.hovered { box-shadow: 0 0 0 1px #e8590c; }
 
 .pe-text-content { width: 100%; height: 100%; outline: none; white-space: pre-wrap; word-break: break-word; overflow: hidden; }
+
+/* Поле для ввода текста (бланк с подчёркиванием) */
+.pe-field-content {
+  width: 100%; height: 100%; outline: none; overflow: hidden;
+  display: flex; align-items: flex-end; white-space: pre;
+}
+.pe-field-content.is-editing { background: #fffbe8; box-shadow: inset 0 0 0 1px #f0c36d; caret-color: #2d8cf0; }
+.pe-field-content.is-empty::before {
+  content: attr(data-placeholder);
+  color: #b3b3b3; font-style: italic; pointer-events: none; width: 100%;
+}
+.pe-element--field:hover .pe-field-content:not(.is-editing) { background: rgba(45,140,240,.07); }
 .pe-image-content { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
 .pe-rect-content { width: 100%; height: 100%; }
 
@@ -1798,7 +2057,7 @@ body { margin: 0; }
 .pe-page { background: #fff; position: relative; box-shadow: 0 2px 16px rgba(0,0,0,.4); }
 .pe-page--flat { box-shadow: none !important; }
 .pe-page-content { position: relative; overflow: hidden; }
-.pe-page-doc { position: absolute; left: 0; top: 0; }
+.pe-page-doc { position: absolute; left: 0; top: 0; isolation: isolate; background: #fff; }
 .pe-print-el { position: absolute; }
 .pe-print-el .pe-text-content { overflow: hidden; }
 .pe-page-frame { position: absolute; border: 1px dashed rgba(45,140,240,.75); pointer-events: none; }
