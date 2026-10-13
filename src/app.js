@@ -4,8 +4,13 @@
 
    Возможности:
    • перетаскивание / масштабирование элементов, умное прилипание (как в Figma);
+   • текстовый блок «обнимает» текст: без пустых полей, с ручной растяжкой,
+     кнопкой «По размеру текста» и двойным кликом по маркеру рамки;
+   • групповое выделение (Ctrl/Shift, рамка по фону, Ctrl+A), перенос,
+     масштабирование, выравнивание и распределение нескольких слоёв сразу;
    • размеры и отступы линиями: до краёв листа и до соседних элементов (Alt);
-   • панель слоёв, панель свойств, undo/redo, JSON-импорт/экспорт;
+   • панель слоёв с перетаскиванием строк (порядок), панель свойств,
+     undo/redo, JSON-импорт/экспорт;
    • печать и экспорт PDF на листе A4 (поля, ориентация, масштаб).
    ========================================================================= */
 
@@ -67,6 +72,7 @@ const DEFAULT_PRINT = {
 };
 
 const HANDLES = ['nw', 'n', 'ne', 'w', 'e', 'sw', 's', 'se'];
+const GROUP_ID = '__group__';   // псевдо-id общей рамки группы (прилипание, линейки)
 const STORAGE_PRINT = 'passport-editor:print-settings';
 const STORAGE_UI = 'passport-editor:ui-settings';
 
@@ -117,6 +123,9 @@ function createTextElement(overrides = {}) {
     textAlign: 'left',
     fontFamily: 'Arial, sans-serif',
     lineHeight: 1.3,
+    // Блок «обнимает» текст: ширина по самой длинной строке, высота по числу строк
+    fitW: true,
+    fitH: true,
     ...overrides,
   };
 }
@@ -172,6 +181,227 @@ function createFieldElement(overrides = {}) {
     underlineColor: '#000000',
     underlineWidth: 1,
     ...overrides,
+  };
+}
+
+/* ============ Блок текста по размеру содержимого (как в Figma) ============ */
+/**
+ * Текстовый блок по умолчанию «обнимает» текст: ширина — по самой длинной
+ * строке, высота — по числу строк. Пустого места вокруг надписи не остаётся,
+ * поэтому линейки отступов меряют от видимых букв.
+ *
+ * Ручное растягивание маркером (или ввод Ш/В в свойствах) выключает авто-размер
+ * по этой оси — блок можно расширить. Вернуть подгонку: двойной клик по маркеру
+ * рамки, кнопка «По размеру текста» или чекбоксы «Авто-ширина/Авто-высота».
+ */
+const MIN_FIT = 4;          // минимальный размер подогнанного блока
+const FIT_EDGE = 4;         // запас до края листа, чтобы текст не вылезал
+const FIT_SLACK = 1;        // 1 px запаса: округление рендера не должно резать буквы
+const FIT_EMPTY_W = 32;     // ширина блока с пустым текстом (чтобы было за что схватить)
+
+/** Какие оси подгоняет двойной клик по маркеру рамки. */
+const HANDLE_AXES = {
+  n: 'h', s: 'h',
+  w: 'w', e: 'w',
+  nw: 'both', ne: 'both', sw: 'both', se: 'both',
+};
+
+let fitProbe = null;
+
+/** Скрытый «мерный» узел вне холста — measuring без влияния на макет. */
+function getFitProbe() {
+  if (typeof document === 'undefined' || !document.body) return null;
+  if (!fitProbe || !fitProbe.isConnected) {
+    fitProbe = document.createElement('div');
+    fitProbe.setAttribute('aria-hidden', 'true');
+    fitProbe.style.cssText = [
+      'position:fixed', 'left:-100000px', 'top:0', 'z-index:-1',
+      'visibility:hidden', 'pointer-events:none', 'padding:0', 'margin:0',
+      'border:0', 'display:block',
+    ].join(';');
+    document.body.appendChild(fitProbe);
+  }
+  return fitProbe;
+}
+
+function styleFitProbe(node, el) {
+  node.style.fontSize = `${Number(el.fontSize) || 13}px`;
+  node.style.fontWeight = el.fontWeight || 'normal';
+  node.style.fontStyle = el.fontStyle || 'normal';
+  node.style.textDecoration = el.textDecoration || 'none';
+  node.style.fontFamily = el.fontFamily || 'Arial, sans-serif';
+  node.style.lineHeight = String(Number(el.lineHeight) || 1.3);
+  node.style.letterSpacing = 'normal';
+  node.style.textAlign = 'left';
+}
+
+/* Оценка «на глаз» — нужна только там, где DOM-измерения недоступны (тесты). */
+const fitCharWidth = (el) => (Number(el.fontSize) || 13) * (el.fontWeight === 'bold' ? 0.62 : 0.55);
+
+function estimateTextWidth(text, el) {
+  let max = 0;
+  for (const line of String(text).split('\n')) max = Math.max(max, line.length * fitCharWidth(el));
+  return max;
+}
+
+function estimateTextHeight(text, el, width) {
+  const lineH = (Number(el.fontSize) || 13) * (Number(el.lineHeight) || 1.3);
+  let lines = 0;
+  for (const line of String(text).split('\n')) {
+    lines += Math.max(1, Math.ceil((line.length * fitCharWidth(el)) / Math.max(1, width)));
+  }
+  return Math.max(1, lines) * lineH;
+}
+
+/** Сколько места у блока по ширине с учётом выравнивания (растём, не вылезая за лист). */
+function availableFitWidth(el) {
+  const w = Number(el.width) || MIN_FIT;
+  const x = Number(el.x) || 0;
+  if (el.textAlign === 'center') {
+    const cx = x + w / 2;
+    return Math.max(MIN_FIT, Math.min(cx, ARTBOARD_WIDTH - cx) * 2 - FIT_EDGE);
+  }
+  if (el.textAlign === 'right') return Math.max(MIN_FIT, x + w - FIT_EDGE);
+  return Math.max(MIN_FIT, ARTBOARD_WIDTH - x - FIT_EDGE);
+}
+
+/**
+ * Размер, который «обнимает» текст.
+ * Авто-ширина → блок равен самой длинной строке (текст не переносится), но не
+ * вылезает за лист. Авто-высота → высота по числу строк при текущей ширине.
+ * Многострочным абзацам в шаблоне авто-ширина выключена: их ширина и есть
+ * граница переноса.
+ */
+function measureTextFit(el) {
+  const text = el.text == null ? '' : String(el.text);
+  const fontSize = Number(el.fontSize) || 13;
+  const lineHeight = Number(el.lineHeight) || 1.3;
+  const cap = availableFitWidth(el);
+
+  if (text.trim() === '') {
+    return { width: FIT_EMPTY_W, height: Math.ceil(fontSize * lineHeight) };
+  }
+
+  const probe = getFitProbe();
+  let natural = 0;
+
+  if (probe) {
+    styleFitProbe(probe, el);
+    // естественная ширина — весь текст в одну строку, без переносов
+    probe.style.whiteSpace = 'pre';
+    probe.style.wordBreak = 'normal';
+    probe.style.width = 'auto';
+    probe.style.maxWidth = 'none';
+    probe.textContent = text;
+    natural = probe.getBoundingClientRect().width;
+  }
+  if (!(natural > 0)) natural = estimateTextWidth(text, el);
+
+  const width = clamp(Math.ceil(natural) + FIT_SLACK, MIN_FIT, Math.max(MIN_FIT, cap));
+
+  let height = 0;
+  if (probe) {
+    probe.style.whiteSpace = 'pre-wrap';
+    probe.style.wordBreak = 'break-word';
+    probe.style.width = `${width}px`;
+    height = probe.getBoundingClientRect().height;
+  }
+  if (!(height > 0)) height = estimateTextHeight(text, el, width);
+
+  return { width, height: Math.max(Math.ceil(fontSize * lineHeight), Math.ceil(height) + FIT_SLACK) };
+}
+
+/**
+ * Подогнать блок текста. Сохраняем визуальную привязку: у текста по центру не
+ * уезжает центр, у текста справа — правый край, верх всегда остаётся на месте.
+ * axes: 'both' | 'w' | 'h'; force — подогнать даже с выключенным авто-размером.
+ */
+function fitTextElement(el, opts = {}) {
+  if (!el || el.type !== 'text') return el;
+  const axes = opts.axes || 'both';
+  const force = !!opts.force;
+  const doW = axes !== 'h' && (force || el.fitW === true);
+  const doH = axes !== 'w' && (force || el.fitH === true);
+  if (!doW && !doH) return el;
+
+  const size = measureTextFit(el);
+  const next = { ...el };
+  if (doW) {
+    const delta = el.width - size.width;
+    next.width = size.width;
+    if (el.textAlign === 'center') next.x = el.x + delta / 2;
+    else if (el.textAlign === 'right') next.x = el.x + delta;
+    next.x = clamp(next.x, 0, Math.max(0, ARTBOARD_WIDTH - next.width));
+  }
+  if (doH) next.height = size.height;
+  return next;
+}
+
+/** Авто-размер после любого изменения текста/шрифта (если флаги включены). */
+function withAutoFit(el) {
+  if (!el || el.type !== 'text' || (el.fitW !== true && el.fitH !== true)) return el;
+  return fitTextElement(el);
+}
+
+/* ===================== Утилиты для группы элементов ===================== */
+/** Общая рамка нескольких элементов. */
+function unionBox(list) {
+  if (!list || !list.length) return null;
+  let x1 = Infinity;
+  let y1 = Infinity;
+  let x2 = -Infinity;
+  let y2 = -Infinity;
+  for (const el of list) {
+    x1 = Math.min(x1, el.x);
+    y1 = Math.min(y1, el.y);
+    x2 = Math.max(x2, el.x + el.width);
+    y2 = Math.max(y2, el.y + el.height);
+  }
+  return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+}
+
+/** Пересечение рамки с элементами (для выделения рамкой-марquee). */
+function intersects(a, b) {
+  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
+/**
+ * Масштабирование группы: положение и размер каждого элемента пересчитываются
+ * из ИСХОДНОЙ геометрии (orig: Map id -> {x,y,width,height,fontSize}) относительно
+ * общей рамки — иначе каждое движение мыши накладывалось бы на предыдущее.
+ * Шрифт масштабируется по среднему коэффициенту, как в Figma.
+ */
+function scaleGroup(list, orig, from, to) {
+  const kx = from.width > 0 ? to.width / from.width : 1;
+  const ky = from.height > 0 ? to.height / from.height : 1;
+  const kf = Math.sqrt(Math.max(0.01, kx) * Math.max(0.01, ky));
+  return list.map((el) => {
+    const o = orig.get(el.id);
+    if (!o) return el;
+    const min = minSizeFor(el);
+    const next = {
+      ...el,
+      x: to.x + (o.x - from.x) * kx,
+      y: to.y + (o.y - from.y) * ky,
+      width: Math.max(min, o.width * kx),
+      height: Math.max(min, o.height * ky),
+    };
+    if (el.type === 'text' || el.type === 'field') {
+      next.fontSize = clamp(Math.round((Number(o.fontSize) || 12) * kf * 10) / 10, 4, 200);
+      // подогнанный текст после масштабирования снова обнимает буквы
+      if (next.fitW === true || next.fitH === true) return fitTextElement(next);
+    }
+    return next;
+  });
+}
+
+/** Рамка из двух углов — в нормальном виде (x, y, width, height). */
+function normalizeRect(x0, y0, x1, y1) {
+  return {
+    x: Math.min(x0, x1),
+    y: Math.min(y0, y1),
+    width: Math.abs(x1 - x0),
+    height: Math.abs(y1 - y0),
   };
 }
 
@@ -235,6 +465,8 @@ function buildInitialElements() {
   add(createTextElement({ x: 60, y: qy + 284, width: 300, height: 16, text: 'Транспортировка и хранение:', fontSize: 11, fontWeight: 'bold', textDecoration: 'underline', name: 'Транспортировка заголовок' }));
 
   add(createTextElement({
+    // многострочный абзац: ширина — граница переноса, высота подгоняется по строкам
+    fitW: false, fitH: true,
     x: 60, y: qy + 302, width: 530, height: 160, fontSize: 10, lineHeight: 1.3, name: 'Текст транспортировка',
     text: 'Ящики и вспомогательные упаковочные средства транспортируются всеми видами транспорта в чистых, сухих, крытых транспортных средствах в соответствии с правилами перевозки грузов, действующими на соответствующем виде транспорта, п. 9.1 Гост 9142-2014\nЯщики и вспомогательные упаковочные средства хранят в упаковке производителя в крытых складских помещениях, защищенных от атмосферных осадков и почвенной влаги, с естественной вентиляцией.\nУсловия хранения - при температуре от минус 14°C до плюс 40°C и относительной влажности 25%-70% п. 9.3 ГОСТ 9142-2014\nИзготовитель гарантирует соответствие гофроизделий требованиям спецификации в течение 12 месяцев со дня изготовления при условии соблюдения потребителем правил транспортирования и хранения.\nИзделия предназначены для непрямого контакта с пищевой продукцией.',
   }));
@@ -572,7 +804,7 @@ function computePrintLayout(settings) {
 /* ===================== Общие куски рендера ===================== */
 /** Содержимое элемента (текст / картинка / линия). kf — коэффициент для шрифта. */
 /** kf — коэффициент масштаба для шрифта (печать/PDF), showPlaceholder — только для экрана. */
-function ElementInner({ el, kf = 1, editing = false, innerRef = null, onBlur = null, onKeyDown = null, showPlaceholder = false }) {
+function ElementInner({ el, kf = 1, editing = false, innerRef = null, onBlur = null, onKeyDown = null, onInput = null, showPlaceholder = false }) {
   if (el.type === 'text') {
     return (
       <div
@@ -580,7 +812,8 @@ function ElementInner({ el, kf = 1, editing = false, innerRef = null, onBlur = n
         contentEditable={editing}
         suppressContentEditableWarning
         onBlur={onBlur}
-        className="pe-text-content"
+        onInput={onInput}
+        className={`pe-text-content${editing ? ' is-editing' : ''}`}
         style={{
           fontSize: el.fontSize * kf,
           fontWeight: el.fontWeight,
@@ -803,17 +1036,85 @@ function ColorField({ label, value, onLive, onSessionStart, onSessionEnd }) {
 }
 
 /* ===================== Панель слоёв ===================== */
-function LayersPanel({ elements, selectedId, onSelect, onToggleVisible, onToggleLock, onMove, onRemove }) {
+/**
+ * Порядок слоёв меняется перетаскиванием строки за ручку ⠿ в любое место списка
+ * (с синей линией-указателем куда встанет). Стрелки ↑/↓ — точная доводка на один
+ * шаг. Ctrl/Shift+клик по строке — групповое выделение; если тащить строку из
+ * выделения, переносится вся группа.
+ */
+function LayersPanel({ elements, selectedId, selectedIds, onSelect, onToggleVisible, onToggleLock, onMove, onRemove, onReorder, onFitAll }) {
+  const [dragIds, setDragIds] = useState(null);
+  const [drop, setDrop] = useState(null);   // { id, place: 'before' | 'after' }
+  const selected = selectedIds && selectedIds.length ? selectedIds : selectedId ? [selectedId] : [];
+
+  function handleDragStart(e, el) {
+    const ids = selected.length > 1 && selected.includes(el.id) ? selected.slice() : [el.id];
+    setDragIds(ids);
+    setDrop(null);
+    try {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', ids.join(','));
+      // тащим «призрак» всей строки, а не одной ручки
+      const row = e.currentTarget.closest('.pe-layer-row');
+      if (row && e.dataTransfer.setDragImage) e.dataTransfer.setDragImage(row, 12, 10);
+    } catch {
+      /* Firefox требует setData, но в тестах dataTransfer может отсутствовать */
+    }
+  }
+
+  function handleDragOver(e, el) {
+    if (!dragIds || dragIds.includes(el.id)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    try { e.dataTransfer.dropEffect = 'move'; } catch { /* не критично */ }
+    const rect = e.currentTarget.getBoundingClientRect();
+    const place = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+    setDrop((cur) => (cur && cur.id === el.id && cur.place === place ? cur : { id: el.id, place }));
+  }
+
+  function handleDrop(e, el) {
+    e.preventDefault();
+    e.stopPropagation();
+    const place = drop && drop.id === el.id ? drop.place : 'after';
+    const ids = dragIds ? dragIds.slice() : [];
+    setDragIds(null);
+    setDrop(null);
+    if (ids.length && !ids.includes(el.id) && onReorder) onReorder(ids, el.id, place);
+  }
+
   return (
     <div className="pe-panel pe-layers">
-      <h3>Слои <span className="pe-count">{elements.length}</span></h3>
-      <div className="pe-layers-list">
+      <h3>
+        Слои <span className="pe-count">{elements.length}</span>
+        {selected.length > 1 && <span className="pe-count pe-count-sel">выбрано {selected.length}</span>}
+        {onFitAll && (
+          <button className="pe-icon-btn pe-head-btn" title="Подогнать все надписи по размеру текста" onClick={onFitAll}>⤢</button>
+        )}
+      </h3>
+      <div className={`pe-layers-list${dragIds ? ' is-dragging' : ''}`}>
         {[...elements].reverse().map((el) => (
           <div
             key={el.id}
-            className={`pe-layer-row${selectedId === el.id ? ' selected' : ''}`}
-            onClick={() => onSelect(el.id)}
+            className={[
+              'pe-layer-row',
+              selected.includes(el.id) ? 'selected' : '',
+              selected.length > 1 && selectedId === el.id ? 'anchor' : '',
+              dragIds && dragIds.includes(el.id) ? 'dragging' : '',
+              drop && drop.id === el.id ? `drop-${drop.place}` : '',
+            ].filter(Boolean).join(' ')}
+            onClick={(e) => onSelect(el.id, e)}
+            onDragOver={(e) => handleDragOver(e, el)}
+            onDrop={(e) => handleDrop(e, el)}
+            onDragLeave={() => setDrop((cur) => (cur && cur.id === el.id ? null : cur))}
           >
+            <span
+              className="pe-grip"
+              draggable
+              title="Перетащите, чтобы изменить порядок слоя"
+              onDragStart={(e) => handleDragStart(e, el)}
+              onDragEnd={() => { setDragIds(null); setDrop(null); }}
+              onClick={(e) => e.stopPropagation()}
+            >⠿</span>
             <button className="pe-icon-btn" title="Видимость" onClick={(e) => { e.stopPropagation(); onToggleVisible(el); }}>
               {el.visible === false ? '–' : '👁'}
             </button>
@@ -833,12 +1134,70 @@ function LayersPanel({ elements, selectedId, onSelect, onToggleVisible, onToggle
           </div>
         ))}
       </div>
+      <p className="pe-hint pe-layers-hint">
+        Перетащите ⠿ — поставить слой в любое место списка. Ctrl+клик — добавить/убрать, Shift+клик — выделить несколько.
+      </p>
     </div>
   );
 }
 
 /* ===================== Панель свойств ===================== */
-function PropsPanel({ el, onLive, onCommit, onSessionStart, onSessionEnd, onDuplicate, onDelete }) {
+function PropsPanel({ el, group, onLive, onCommit, onSessionStart, onSessionEnd, onDuplicate, onDelete, onFit, onFitToggle, onFitGroup, onAlign, onClearSelection }) {
+  /* ---------- Группа: общая рамка, выравнивание, распределение ---------- */
+  if (group) {
+    const b = group.box;
+    const textCount = group.elements.filter((item) => item.type === 'text').length;
+    return (
+      <div className="pe-panel pe-props">
+        <h3>Свойства</h3>
+        <div className="pe-el-title">Выделено слоёв: {group.count}</div>
+
+        <div className="pe-grid2">
+          <div className="pe-info"><span>X</span><b>{round(b.x)} px</b></div>
+          <div className="pe-info"><span>Y</span><b>{round(b.y)} px</b></div>
+          <div className="pe-info"><span>Ш</span><b>{round(b.width)} px</b></div>
+          <div className="pe-info"><span>В</span><b>{round(b.height)} px</b></div>
+        </div>
+        <p className="pe-hint">Размеры общей рамки. Тяните группу мышью или маркерами рамки — масштабируются все слои сразу.</p>
+
+        <h4>Выравнивание</h4>
+        <div className="pe-btn-group">
+          <button title="По левому краю" onClick={() => onAlign('left')}>⇤</button>
+          <button title="Центр по горизонтали" onClick={() => onAlign('center-x')}>↔</button>
+          <button title="По правому краю" onClick={() => onAlign('right')}>⇥</button>
+        </div>
+        <div className="pe-btn-group">
+          <button title="По верхнему краю" onClick={() => onAlign('top')}>⤒</button>
+          <button title="Центр по вертикали" onClick={() => onAlign('center-y')}>↕</button>
+          <button title="По нижнему краю" onClick={() => onAlign('bottom')}>⤓</button>
+        </div>
+        <div className="pe-btn-group">
+          <button title="Равные промежутки по горизонтали (нужно 3+ слоя)" onClick={() => onAlign('distribute-x')}>⇹ По X</button>
+          <button title="Равные промежутки по вертикали (нужно 3+ слоя)" onClick={() => onAlign('distribute-y')}>⇳ По Y</button>
+        </div>
+
+        {textCount > 0 && (
+          <>
+            <h4>Текст</h4>
+            <button className="pe-wide-btn" title="Убрать пустое место вокруг каждой надписи" onClick={onFitGroup}>
+              ⤢ Подогнать надписи по тексту ({textCount})
+            </button>
+          </>
+        )}
+
+        <h4>Слой</h4>
+        <div className="pe-btn-group">
+          <button onClick={onDuplicate}>Дублировать ({group.count})</button>
+          <button className="pe-danger" onClick={onDelete}>Удалить ({group.count})</button>
+        </div>
+        <button className="pe-wide-btn" onClick={onClearSelection}>Снять выделение (Esc)</button>
+        <p className="pe-hint">
+          Ctrl+клик по слою — убрать из выделения, Shift+клик — добавить. Ctrl+A — выделить всё.
+        </p>
+      </div>
+    );
+  }
+
   if (!el) {
     return (
       <div className="pe-panel pe-props">
@@ -846,9 +1205,12 @@ function PropsPanel({ el, onLive, onCommit, onSessionStart, onSessionEnd, onDupl
         <p className="pe-hint">Выберите элемент на холсте.</p>
         <ul className="pe-hint-list">
           <li>Двойной клик по тексту или полю — редактирование</li>
+          <li>Двойной клик по маркеру рамки — блок по размеру текста</li>
+          <li>Ctrl/Shift+клик и рамка по фону — выделить несколько слоёв</li>
           <li>Стрелки — сдвиг на 1 px, Shift+стрелки — на 10 px</li>
           <li>Alt — отступы до соседних элементов</li>
           <li>Ctrl — временно отключить прилипание</li>
+          <li>Ctrl+A — выделить всё, Esc — снять выделение</li>
           <li>Ctrl+P — печать на A4</li>
         </ul>
       </div>
@@ -887,6 +1249,27 @@ function PropsPanel({ el, onLive, onCommit, onSessionStart, onSessionEnd, onDupl
 
       {el.type === 'text' && (
         <>
+          <h4>Размер блока</h4>
+          <button className="pe-wide-btn" title="Убрать пустое место вокруг надписи" onClick={() => onFit('both')}>
+            ⤢ По размеру текста
+          </button>
+          <div className="pe-btn-group">
+            <button title="Подогнать только ширину" onClick={() => onFit('w')}>↔ Ширину</button>
+            <button title="Подогнать только высоту" onClick={() => onFit('h')}>↕ Высоту</button>
+          </div>
+          <label className="pe-checkbox">
+            <input type="checkbox" checked={el.fitW === true} onChange={(e) => onFitToggle('w', e.currentTarget.checked)} />
+            Авто-ширина по тексту
+          </label>
+          <label className="pe-checkbox">
+            <input type="checkbox" checked={el.fitH === true} onChange={(e) => onFitToggle('h', e.currentTarget.checked)} />
+            Авто-высота по тексту
+          </label>
+          <p className="pe-hint">
+            Двойной клик по маркеру рамки на холсте подгоняет блок: боковой — ширину, верхний/нижний — высоту, угловой — и то и другое.
+            Ручное растягивание или ввод Ш/В выключает авто-размер по этой оси.
+          </p>
+
           <h4>Текст</h4>
           <NumberField label="Размер шрифта" value={el.fontSize} min={4} max={200} onLive={(n) => onLive({ fontSize: n })} onSessionStart={onSessionStart} onSessionEnd={onSessionEnd} suffix="px" />
           <NumberField label="Межстрочный" value={el.lineHeight} step={0.05} min={0.6} max={4} onLive={(n) => onLive({ lineHeight: n })} onSessionStart={onSessionStart} onSessionEnd={onSessionEnd} />
@@ -1179,10 +1562,13 @@ export default function PassportEditor() {
   }));
   const elements = state.present;
 
-  const [selectedId, setSelectedId] = useState(null);
+  const [selectedId, setSelectedId] = useState(null);   // «активный» элемент группы
+  const [selectedIds, setSelectedIds] = useState([]);   // групповое выделение (Ctrl/Shift/рамка)
   const [editingId, setEditingId] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
   const [dragId, setDragId] = useState(null);
+  const [marquee, setMarquee] = useState(null);
+  const [marqueeActive, setMarqueeActive] = useState(false);
   const [guides, setGuides] = useState({ x: null, y: null });
   const [badge, setBadge] = useState(null);
   const [hoverId, setHoverId] = useState(null);
@@ -1195,8 +1581,11 @@ export default function PassportEditor() {
   const [busy, setBusy] = useState('');
 
   const dragRef = useRef(null);
+  const marqueeRef = useRef(null);
+  const artboardRef = useRef(null);
   const elementsRef = useRef(elements);
   const selectedIdRef = useRef(selectedId);
+  const selectedIdsRef = useRef(selectedIds);
   const editingIdRef = useRef(editingId);
   const editingRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -1209,13 +1598,60 @@ export default function PassportEditor() {
 
   useEffect(() => { elementsRef.current = elements; }, [elements]);
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
+  useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
   useEffect(() => { editingIdRef.current = editingId; }, [editingId]);
   useEffect(() => { uiRef.current = ui; writeStorage(STORAGE_UI, ui); }, [ui]);
   useEffect(() => { printRef.current = printSettings; writeStorage(STORAGE_PRINT, printSettings); }, [printSettings]);
   useEffect(() => () => clearTimeout(nudgeRef.current.timer), []);
 
   const selectedEl = elements.find((e) => e.id === selectedId) || null;
+  const selectedEls = selectedIds.length ? elements.filter((e) => selectedIds.includes(e.id)) : [];
+  const isMulti = selectedEls.length > 1;
+  const groupBox = isMulti ? unionBox(selectedEls) : null;
   const printLayout = computePrintLayout(printSettings);
+
+  /* ---------- Выделение (одиночное и групповое, как в Figma) ---------- */
+  /** Единая точка изменения выделения: список id + «активный» элемент. */
+  function setSelection(ids, anchorId) {
+    const list = Array.isArray(ids) ? ids.filter(Boolean) : ids ? [ids] : [];
+    const anchor = anchorId !== undefined ? anchorId : list.length === 1 ? list[0] : null;
+    selectedIdsRef.current = list;
+    selectedIdRef.current = anchor;
+    setSelectedIds(list);
+    setSelectedId(anchor);
+  }
+
+  function clearSelection() {
+    setSelection([], null);
+  }
+
+  /**
+   * Клик с учётом Ctrl и Shift. keepGroup = true (холст) — клик по слою из
+   * группы не разваливает её, чтобы можно было тянуть все слои сразу;
+   * keepGroup = false (панель слоёв) — клик выделяет только этот слой.
+   */
+  function selectWithModifiers(id, e, keepGroup = true) {
+    const ctrl = e && (e.ctrlKey || e.metaKey);
+    const shift = e && e.shiftKey;
+    const current = selectedIdsRef.current;
+    if (ctrl) {
+      const ids = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
+      setSelection(ids, ids.includes(id) ? id : ids.length === 1 ? ids[0] : null);
+      return ids;
+    }
+    if (shift) {
+      const ids = current.includes(id) ? current : [...current, id];
+      setSelection(ids, id);
+      return ids;
+    }
+    // обычный клик по слою из группы не разваливает её — можно тянуть сразу все
+    if (keepGroup && current.length > 1 && current.includes(id)) {
+      setSelection(current, id);
+      return current;
+    }
+    setSelection([id], id);
+    return [id];
+  }
 
   /* ---------- Мутации ---------- */
   function liveElements(next) {
@@ -1255,6 +1691,108 @@ export default function PassportEditor() {
     toastTimer.current = setTimeout(() => setToast(''), 2600);
   }
 
+  /* ---------- Подгонка блока по тексту ---------- */
+  /** Кнопка «По размеру текста» / двойной клик по маркеру рамки. */
+  function fitSelected(axes = 'both') {
+    const id = selectedIdRef.current;
+    const el = elementsRef.current.find((item) => item.id === id);
+    if (!el || el.type !== 'text' || el.locked) return;
+    const fitted = fitTextElement(el, { axes, force: true });
+    const flags = axes === 'w' ? { fitW: true } : axes === 'h' ? { fitH: true } : { fitW: true, fitH: true };
+    commitElements(elementsRef.current.map((item) => (item.id === id ? { ...fitted, ...flags } : item)));
+    showToast(`Блок подогнан по тексту: ${round(fitted.width)}×${round(fitted.height)} px`);
+  }
+
+  /** Подогнать только выделенные надписи (панель свойств группы). */
+  function fitSelectedTexts() {
+    const set = new Set(selectedIdsRef.current);
+    let count = 0;
+    const next = elementsRef.current.map((el) => {
+      if (!set.has(el.id) || el.type !== 'text' || el.locked) return el;
+      const fitted = fitTextElement(el, { force: true });
+      if (fitted.width !== el.width || fitted.height !== el.height || fitted.x !== el.x) count += 1;
+      return fitted;
+    });
+    if (!count) {
+      showToast('Выделенные надписи уже по размеру текста');
+      return;
+    }
+    commitElements(next);
+    showToast(`Подогнано надписей: ${count}`);
+  }
+
+  /** Массовая подгонка всех надписей — одной записью в истории. */
+  function fitAllTexts() {
+    let count = 0;
+    const next = elementsRef.current.map((el) => {
+      if (el.type !== 'text' || el.locked) return el;
+      const fitted = fitTextElement(el, { force: true });
+      if (fitted.width !== el.width || fitted.height !== el.height || fitted.x !== el.x) count += 1;
+      return fitted;
+    });
+    if (!count) {
+      showToast('Все надписи уже по размеру текста');
+      return;
+    }
+    commitElements(next);
+    showToast(`Подогнано надписей: ${count}`);
+  }
+
+  /** Чекбоксы «Авто-ширина» / «Авто-высота». */
+  function toggleFit(axis, on) {
+    const id = selectedIdRef.current;
+    const el = elementsRef.current.find((item) => item.id === id);
+    if (!el || el.type !== 'text') return;
+    const flags = axis === 'w' ? { fitW: on } : { fitH: on };
+    let next = { ...el, ...flags };
+    if (on) next = fitTextElement(next, { axes: axis, force: true });
+    commitElements(elementsRef.current.map((item) => (item.id === id ? next : item)));
+  }
+
+  /**
+   * Правка свойств: ручной размер выключает авто-подгонку по этой оси,
+   * а смена текста/шрифта — сразу пересчитывает блок.
+   */
+  function applyPropsTo(el, props) {
+    const next = { ...el, ...props };
+    if (el.type !== 'text') return next;
+    if ('width' in props) next.fitW = false;
+    if ('height' in props) next.fitH = false;
+    return withAutoFit(next);
+  }
+
+  function liveProps(id, props) {
+    liveMap(id, (el) => applyPropsTo(el, props));
+  }
+
+  function commitPropsAuto(id, props) {
+    commitElements(elementsRef.current.map((el) => (el.id === id ? applyPropsTo(el, props) : el)));
+  }
+
+  /* Один раз подгоняем надписи шаблона — без записи в историю (SET). */
+  useEffect(() => {
+    let cancelled = false;
+    function refitAuto() {
+      if (cancelled) return;
+      let changed = false;
+      const next = elementsRef.current.map((el) => {
+        const fitted = withAutoFit(el);
+        if (fitted === el) return el;
+        if (fitted.width === el.width && fitted.height === el.height && fitted.x === el.x) return el;
+        changed = true;
+        return fitted;
+      });
+      if (changed) liveElements(next);
+    }
+    // после загрузки веб-шрифтов метрики меняются — повторяем замер
+    if (typeof document !== 'undefined' && document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(refitAuto).catch(() => {});
+    }
+    const t1 = setTimeout(refitAuto, 60);
+    const t2 = setTimeout(refitAuto, 600);
+    return () => { cancelled = true; clearTimeout(t1); clearTimeout(t2); };
+  }, []);
+
   /* ---------- Редактирование текста ---------- */
   function startEditing(el) {
     if (el.locked || (el.type !== 'text' && el.type !== 'field')) return;
@@ -1278,12 +1816,40 @@ export default function PassportEditor() {
         } else {
           const newText = raw;
           if (newText !== current.text) {
-            commitElements(elementsRef.current.map((e) => (e.id === id ? { ...e, text: newText } : e)));
+            // блок сразу «обнимает» новый текст (если авто-размер включён)
+            commitElements(elementsRef.current.map((e) => (e.id === id ? withAutoFit({ ...e, text: newText }) : e)));
           }
         }
       }
     }
     setEditingId(null);
+  }
+
+  /**
+   * Блок «обнимает» текст прямо во время набора (как в Figma). Меняем только
+   * геометрию: значение текста в состоянии не трогаем, иначе React перерисует
+   * содержимое contentEditable и каретка прыгнет в начало.
+   */
+  function handleEditorInput() {
+    const id = editingIdRef.current;
+    const el = elementsRef.current.find((item) => item.id === id);
+    if (!el || el.type !== 'text' || (el.fitW !== true && el.fitH !== true)) return;
+    const node = editingRef.current;
+    if (!node) return;
+    const raw = typeof node.innerText === 'string' ? node.innerText : (node.textContent || '');
+    const size = measureTextFit({ ...el, text: raw });
+    liveMap(id, (item) => {
+      const next = { ...item };
+      if (item.fitW === true && size.width !== item.width) {
+        const delta = item.width - size.width;
+        next.width = size.width;
+        if (item.textAlign === 'center') next.x = item.x + delta / 2;
+        else if (item.textAlign === 'right') next.x = item.x + delta;
+        next.x = clamp(next.x, 0, Math.max(0, ARTBOARD_WIDTH - next.width));
+      }
+      if (item.fitH === true && size.height !== item.height) next.height = size.height;
+      return next;
+    });
   }
 
   /** Enter в поле ввода — сохранить значение и выйти из режима редактирования. */
@@ -1313,28 +1879,47 @@ export default function PassportEditor() {
   function handleElementMouseDown(e, el) {
     e.stopPropagation();
     if (editingIdRef.current && editingIdRef.current !== el.id) commitEditing();
-    setSelectedId(el.id);
+
+    // Ctrl/Cmd+клик — добавить или убрать из выделения, не начиная перенос
+    if (e.ctrlKey || e.metaKey) {
+      selectWithModifiers(el.id, e);
+      return;
+    }
+
+    const ids = selectWithModifiers(el.id, e);
     if (el.locked || editingIdRef.current === el.id || e.button !== 0) return;
     flushNudge();
+
+    // тянем сразу всё выделение; прилипание считаем по общей рамке группы
+    const group = elementsRef.current.filter((item) => ids.includes(item.id) && item.visible !== false);
+    const moving = group.length ? group : [el];
     dragRef.current = {
       mode: 'move',
       id: el.id,
+      ids: moving.map((item) => item.id),
       startX: e.clientX,
       startY: e.clientY,
       orig: { x: el.x, y: el.y, width: el.width, height: el.height },
+      origList: moving.map((item) => ({ id: item.id, x: item.x, y: item.y })),
+      groupBox: unionBox(moving),
       snapshot: elementsRef.current,
       moved: false,
+      // Shift+клик добавляет слой — сужать выделение при клике без движения не надо
+      narrowOnClick: !e.shiftKey && moving.length > 1,
     };
-    setDragId(el.id);
+    setDragId(moving.length > 1 ? GROUP_ID : el.id);
     setIsDragging(true);
   }
 
   function handleResizeStart(e, el, handle) {
     e.stopPropagation();
     e.preventDefault();
+    if (e.button !== 0) return;
+    flushNudge();
     dragRef.current = {
       mode: 'resize',
       id: el.id,
+      ids: [el.id],
       handle,
       startX: e.clientX,
       startY: e.clientY,
@@ -1345,6 +1930,90 @@ export default function PassportEditor() {
     setDragId(el.id);
     setIsDragging(true);
   }
+
+  /** Растягивание общей рамки группы — масштабирует все выбранные элементы. */
+  function handleGroupResizeStart(e, box, handle) {
+    e.stopPropagation();
+    e.preventDefault();
+    if (e.button !== 0 || !box) return;
+    flushNudge();
+    const ids = selectedIdsRef.current.filter((id) => {
+      const el = elementsRef.current.find((item) => item.id === id);
+      return el && !el.locked && el.visible !== false;
+    });
+    if (ids.length < 2) return;
+    const set = new Set(ids);
+    const orig = new Map(elementsRef.current.filter((el) => set.has(el.id))
+      .map((el) => [el.id, { x: el.x, y: el.y, width: el.width, height: el.height, fontSize: el.fontSize }]));
+    dragRef.current = {
+      mode: 'group-resize',
+      id: null,
+      ids,
+      handle,
+      startX: e.clientX,
+      startY: e.clientY,
+      groupBox: { ...box },
+      orig,
+      snapshot: elementsRef.current,
+      moved: false,
+    };
+    setDragId(GROUP_ID);
+    setIsDragging(true);
+  }
+
+  /* ---------- Выделение рамкой (marquee) по фону листа ---------- */
+  function handleBackgroundMouseDown(e) {
+    if (e.button !== 0) return;
+    if (editingIdRef.current) commitEditing();
+    const rect = artboardRef.current ? artboardRef.current.getBoundingClientRect() : null;
+    const additive = e.ctrlKey || e.metaKey || e.shiftKey;
+    const base = additive ? selectedIdsRef.current.slice() : [];
+    if (!additive) clearSelection();
+    if (!rect) return;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    marqueeRef.current = { x0: x, y0: y, x1: x, y1: y, base, active: false };
+    setMarqueeActive(true);
+  }
+
+  useEffect(() => {
+    if (!marqueeActive) return undefined;
+
+    function onMove(e) {
+      const m = marqueeRef.current;
+      const rect = artboardRef.current ? artboardRef.current.getBoundingClientRect() : null;
+      if (!m || !rect) return;
+      m.x1 = clamp(e.clientX - rect.left, -400, ARTBOARD_WIDTH + 400);
+      m.y1 = clamp(e.clientY - rect.top, -400, ARTBOARD_HEIGHT + 400);
+      if (Math.abs(m.x1 - m.x0) > 2 || Math.abs(m.y1 - m.y0) > 2) m.active = true;
+      const box = normalizeRect(m.x0, m.y0, m.x1, m.y1);
+      setMarquee(box);
+      if (!m.active) return;
+      const hits = elementsRef.current
+        .filter((el) => el.visible !== false && !el.locked
+          && intersects({ x: el.x, y: el.y, width: el.width, height: el.height }, box))
+        .map((el) => el.id);
+      const ids = Array.from(new Set([...m.base, ...hits]));
+      setSelection(ids, ids.length ? ids[ids.length - 1] : null);
+    }
+
+    function onUp() {
+      const m = marqueeRef.current;
+      marqueeRef.current = null;
+      setMarqueeActive(false);
+      setMarquee(null);
+      // обычный клик по фону (без движения) — снять выделение
+      if (m && !m.active) clearSelection();
+    }
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [marqueeActive]);
 
   useEffect(() => {
     if (!isDragging) return undefined;
@@ -1357,24 +2026,46 @@ export default function PassportEditor() {
       if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) d.moved = true;
 
       const currentEl = elementsRef.current.find((item) => item.id === d.id);
-      if (!currentEl) return;
+      if (!currentEl && d.mode !== 'group-resize') return;
       const snapOn = uiRef.current.snap && !e.ctrlKey && !e.metaKey;
 
       if (d.mode === 'move') {
-        let nx = d.orig.x + dx;
-        let ny = d.orig.y + dy;
+        const ids = d.ids && d.ids.length ? d.ids : [d.id];
+        const multi = ids.length > 1;
+        const base = multi ? d.groupBox : d.orig;
+        let nx = base.x + dx;
+        let ny = base.y + dy;
         let gx = null;
         let gy = null;
         if (snapOn) {
-          const snap = calculateSnapping(currentEl, nx, ny, elementsRef.current);
+          // для группы прилипает общая рамка, сами элементы в целях не участвуют
+          const others = multi ? elementsRef.current.filter((item) => !ids.includes(item.id)) : elementsRef.current;
+          const probe = multi ? { id: GROUP_ID, width: base.width, height: base.height } : currentEl;
+          const snap = calculateSnapping(probe, nx, ny, others);
           nx = snap.x;
           ny = snap.y;
           gx = snap.guideX;
           gy = snap.guideY;
         }
+        const sx = nx - base.x;
+        const sy = ny - base.y;
         setGuides({ x: gx, y: gy });
-        setBadge({ text: `X ${round(nx)}   Y ${round(ny)}`, x: nx + currentEl.width + 10, y: ny + currentEl.height + 10 });
-        liveMap(d.id, (el) => ({ ...el, x: nx, y: ny }));
+        setBadge({
+          text: multi ? `Группа ${ids.length} · X ${round(nx)}   Y ${round(ny)}` : `X ${round(nx)}   Y ${round(ny)}`,
+          x: nx + base.width + 10,
+          y: ny + base.height + 10,
+        });
+        const places = new Map(d.origList.map((o) => [o.id, { x: o.x + sx, y: o.y + sy }]));
+        liveElements(elementsRef.current.map((item) => (places.has(item.id) ? { ...item, ...places.get(item.id) } : item)));
+      } else if (d.mode === 'group-resize') {
+        const box = computeResize(d.handle, d.groupBox, dx, dy, MIN_SIZE);
+        setGuides({ x: null, y: null });
+        setBadge({
+          text: `${round(box.width)} × ${round(box.height)} · ${d.ids.length} слоёв`,
+          x: box.x + box.width + 10,
+          y: box.y + box.height + 10,
+        });
+        liveElements(scaleGroup(elementsRef.current, d.orig, d.groupBox, box));
       } else {
         let box;
         let gx = null;
@@ -1390,7 +2081,14 @@ export default function PassportEditor() {
         }
         setGuides({ x: gx, y: gy });
         setBadge({ text: `${round(box.width)} × ${round(box.height)}`, x: box.x + box.width + 10, y: box.y + box.height + 10 });
-        liveMap(d.id, () => ({ ...currentEl, ...box }));
+        // ручное растягивание отключает авто-размер блока по тексту
+        const sizeFlags = currentEl.type === 'text' && d.moved
+          ? {
+            ...(d.handle.includes('w') || d.handle.includes('e') ? { fitW: false } : {}),
+            ...(d.handle.includes('n') || d.handle.includes('s') ? { fitH: false } : {}),
+          }
+          : {};
+        liveMap(d.id, () => ({ ...currentEl, ...box, ...sizeFlags }));
       }
     }
 
@@ -1404,6 +2102,9 @@ export default function PassportEditor() {
       if (!d) return;
       if (d.moved) {
         dispatch({ type: 'COMMIT_FROM_SNAPSHOT', snapshot: d.snapshot, payload: elementsRef.current });
+      } else if (d.mode === 'move' && d.narrowOnClick && d.id) {
+        // просто кликнули по слою группы (без переноса) — выделяем только его
+        setSelection([d.id], d.id);
       }
     }
 
@@ -1420,21 +2121,22 @@ export default function PassportEditor() {
 
   /* ---------- Действия над элементами ---------- */
   function addText() {
-    const el = createTextElement({ x: 120, y: 120 });
+    // новый текст создаётся сразу по размеру содержимого
+    const el = fitTextElement(createTextElement({ x: 120, y: 120 }), { force: true });
     commitElements([...elementsRef.current, el]);
-    setSelectedId(el.id);
+    setSelection([el.id], el.id);
   }
 
   function addLine() {
     const el = createLineElement({ x: 120, y: 120 });
     commitElements([...elementsRef.current, el]);
-    setSelectedId(el.id);
+    setSelection([el.id], el.id);
   }
 
   function addField() {
     const el = createFieldElement({ x: 120, y: 120 });
     commitElements([...elementsRef.current, el]);
-    setSelectedId(el.id);
+    setSelection([el.id], el.id);
     setEditingId(el.id);
   }
 
@@ -1461,7 +2163,7 @@ export default function PassportEditor() {
           name: file.name || 'Изображение',
         });
         commitElements([...elementsRef.current, el]);
-        setSelectedId(el.id);
+        setSelection([el.id], el.id);
       };
       img.src = ev.target.result;
     };
@@ -1469,24 +2171,37 @@ export default function PassportEditor() {
     e.currentTarget.value = '';
   }
 
+  /** Ctrl+D — копии всех выделенных слоёв. */
   function duplicateSelected() {
-    const el = elementsRef.current.find((item) => item.id === selectedIdRef.current);
-    if (!el) return;
-    const copy = { ...el, id: genId(), x: el.x + 16, y: el.y + 16, name: `${el.name || el.type} копия` };
-    commitElements([...elementsRef.current, copy]);
-    setSelectedId(copy.id);
+    const set = new Set(selectedIdsRef.current);
+    const source = elementsRef.current.filter((el) => set.has(el.id));
+    if (!source.length) return;
+    const copies = source.map((el) => ({
+      ...el,
+      id: genId(),
+      x: el.x + 16,
+      y: el.y + 16,
+      name: source.length > 1 ? el.name || el.type : `${el.name || el.type} копия`,
+    }));
+    commitElements([...elementsRef.current, ...copies]);
+    setSelection(copies.map((c) => c.id), copies[copies.length - 1].id);
+    if (copies.length > 1) showToast(`Продублировано слоёв: ${copies.length}`);
   }
 
   function deleteSelected() {
-    const id = selectedIdRef.current;
-    if (!id) return;
-    commitElements(elementsRef.current.filter((el) => el.id !== id));
-    setSelectedId(null);
+    const set = new Set(selectedIdsRef.current);
+    if (!set.size) return;
+    commitElements(elementsRef.current.filter((el) => !set.has(el.id)));
+    clearSelection();
+    if (set.size > 1) showToast(`Удалено слоёв: ${set.size}`);
   }
 
   function removeLayer(id) {
     commitElements(elementsRef.current.filter((el) => el.id !== id));
-    if (selectedIdRef.current === id) setSelectedId(null);
+    if (selectedIdsRef.current.includes(id)) {
+      const rest = selectedIdsRef.current.filter((x) => x !== id);
+      setSelection(rest, rest.length === 1 ? rest[0] : null);
+    }
   }
 
   function moveLayer(id, direction) {
@@ -1498,14 +2213,88 @@ export default function PassportEditor() {
     commitElements(arr);
   }
 
+  /**
+   * Перетаскивание строк в панели слоёв. place — куда вставить относительно
+   * строки-цели В ПАНЕЛИ ('before' = выше). Панель показывает слои сверху вниз,
+   * а массив хранит их снизу вверх (z-order), поэтому «выше в панели» =
+   * «позже в массиве».
+   */
+  function reorderLayers(dragIds, targetId, place) {
+    const list = elementsRef.current;
+    const ids = (Array.isArray(dragIds) ? dragIds : [dragIds]).filter(Boolean);
+    if (!ids.length || ids.includes(targetId)) return;
+    const set = new Set(ids);
+    const moving = list.filter((el) => set.has(el.id));
+    const rest = list.filter((el) => !set.has(el.id));
+    if (!moving.length || rest.length !== list.length - moving.length) return;
+    const idx = rest.findIndex((el) => el.id === targetId);
+    if (idx < 0) return;
+    const insertAt = place === 'before' ? idx + 1 : idx;
+    const next = [...rest.slice(0, insertAt), ...moving, ...rest.slice(insertAt)];
+    if (next.length !== list.length) return;
+    commitElements(next);
+  }
+
+  /** Выравнивание и распределение группы (как в Figma). */
+  function alignSelected(mode) {
+    const set = new Set(selectedIdsRef.current);
+    const targets = elementsRef.current.filter((el) => set.has(el.id) && !el.locked && el.visible !== false);
+    if (targets.length < 2) {
+      showToast('Нужно выделить минимум 2 элемента');
+      return;
+    }
+    const box = unionBox(targets);
+    const byId = new Map(targets.map((el) => [el.id, el]));
+
+    if (mode === 'distribute-x' || mode === 'distribute-y') {
+      if (targets.length < 3) {
+        showToast('Распределение: нужно минимум 3 элемента');
+        return;
+      }
+      const key = mode === 'distribute-x' ? 'x' : 'y';
+      const dim = mode === 'distribute-x' ? 'width' : 'height';
+      const sorted = [...targets].sort((a, b) => a[key] + a[dim] / 2 - (b[key] + b[dim] / 2));
+      const span = box[key === 'x' ? 'width' : 'height'];
+      const used = sorted.reduce((sum, el) => sum + el[dim], 0);
+      const gap = (span - used) / (sorted.length - 1);
+      const placed = new Map();
+      let cursor = key === 'x' ? box.x : box.y;
+      for (const el of sorted) {
+        placed.set(el.id, cursor);
+        cursor += el[dim] + gap;
+      }
+      commitElements(elementsRef.current.map((el) => (placed.has(el.id) ? { ...el, [key]: placed.get(el.id) } : el)));
+      showToast(mode === 'distribute-x' ? 'Распределено по горизонтали' : 'Распределено по вертикали');
+      return;
+    }
+
+    const next = elementsRef.current.map((el) => {
+      const t = byId.get(el.id);
+      if (!t) return el;
+      switch (mode) {
+        case 'left': return { ...el, x: box.x };
+        case 'center-x': return { ...el, x: box.x + (box.width - t.width) / 2 };
+        case 'right': return { ...el, x: box.x + box.width - t.width };
+        case 'top': return { ...el, y: box.y };
+        case 'center-y': return { ...el, y: box.y + (box.height - t.height) / 2 };
+        case 'bottom': return { ...el, y: box.y + box.height - t.height };
+        default: return el;
+      }
+    });
+    commitElements(next);
+  }
+
+  /** Стрелки двигают всё выделение; серия нажатий — одна запись в истории. */
   function nudge(dx, dy) {
-    const el = elementsRef.current.find((item) => item.id === selectedIdRef.current);
-    if (!el || el.locked) return;
+    const set = new Set(selectedIdsRef.current);
+    const targets = elementsRef.current.filter((el) => set.has(el.id) && !el.locked && el.visible !== false);
+    if (!targets.length) return;
     if (!nudgeRef.current.active) {
       nudgeRef.current = { active: true, snapshot: elementsRef.current, timer: null };
     }
     clearTimeout(nudgeRef.current.timer);
-    liveMap(el.id, (item) => ({ ...item, x: item.x + dx, y: item.y + dy }));
+    const ids = new Set(targets.map((el) => el.id));
+    liveElements(elementsRef.current.map((item) => (ids.has(item.id) ? { ...item, x: item.x + dx, y: item.y + dy } : item)));
     nudgeRef.current.timer = setTimeout(flushNudge, 700);
   }
 
@@ -1555,9 +2344,14 @@ export default function PassportEditor() {
         });
         idCounter = maxId + 1;
         if (parsed.print) setPrintSettings({ ...DEFAULT_PRINT, ...parsed.print });
-        elementsRef.current = els;
-        dispatch({ type: 'REPLACE', payload: els });
-        setSelectedId(null);
+        // у старых файлов нет флагов авто-размера: геометрию оставляем как есть
+        const normalized = els.map((el) => {
+          if (!el || typeof el !== 'object' || el.type !== 'text') return el;
+          return withAutoFit({ ...el, fitW: el.fitW === true, fitH: el.fitH === true });
+        });
+        elementsRef.current = normalized;
+        dispatch({ type: 'REPLACE', payload: normalized });
+        clearSelection();
         showToast(`Загружено элементов: ${els.length}`);
       } catch (err) {
         window.alert(`Ошибка чтения файла: ${err.message}`);
@@ -1627,12 +2421,6 @@ export default function PassportEditor() {
     }
   }
 
-  function handleBackgroundMouseDown(e) {
-    if (e.button !== 0) return;
-    if (editingIdRef.current) commitEditing();
-    setSelectedId(null);
-  }
-
   /* ---------- Клавиатура ---------- */
   useEffect(() => {
     function isTyping(target) {
@@ -1678,12 +2466,22 @@ export default function PassportEditor() {
       if (key === 'Escape') {
         if (printOpen) { setPrintOpen(false); return; }
         if (editingIdRef.current) { commitEditing(); return; }
-        setSelectedId(null);
+        clearSelection();
         return;
       }
       if (isTyping(e.target)) return;
 
-      if ((key === 'Delete' || key === 'Backspace') && selectedIdRef.current) {
+      if (ctrl && key.toLowerCase() === 'a') {
+        e.preventDefault();
+        const ids = elementsRef.current.filter((el) => el.visible !== false && !el.locked).map((el) => el.id);
+        if (ids.length) {
+          setSelection(ids, ids[ids.length - 1]);
+          showToast(`Выделено слоёв: ${ids.length}`);
+        }
+        return;
+      }
+
+      if ((key === 'Delete' || key === 'Backspace') && selectedIdsRef.current.length) {
         e.preventDefault();
         deleteSelected();
         return;
@@ -1697,7 +2495,7 @@ export default function PassportEditor() {
         }
       }
       const steps = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
-      if (steps[key] && selectedIdRef.current) {
+      if (steps[key] && selectedIdsRef.current.length) {
         e.preventDefault();
         const k = e.shiftKey ? 10 : 1;
         nudge(steps[key][0] * k, steps[key][1] * k);
@@ -1722,18 +2520,22 @@ export default function PassportEditor() {
   }, [printOpen]);
 
   /* ---------- Что показываем линейками ---------- */
-  const measuredEl = isDragging && dragId
-    ? elements.find((e) => e.id === dragId) || null
-    : selectedEl;
+  const groupDrag = isDragging && dragId === GROUP_ID;
+  const measuredEl = isDragging
+    ? (groupDrag ? groupBox : elements.find((e) => e.id === dragId) || null)
+    : (isMulti ? groupBox : selectedEl);
 
   let measurements = [];
   if (measuredEl && (ui.showMargins || isDragging)) {
     // До краёв листа — всегда; до соседних элементов — при зажатом Alt (как в Figma)
-    measurements = computeMeasurements(measuredEl, elements, { sheet: true, neighbors: altDown });
-    const hovered = altDown && hoverId && hoverId !== measuredEl.id
+    const isGroup = groupDrag || isMulti;
+    const others = isGroup ? elements.filter((e) => !selectedIds.includes(e.id)) : elements;
+    const target = isGroup ? { ...measuredEl, id: GROUP_ID } : measuredEl;
+    measurements = computeMeasurements(target, others, { sheet: true, neighbors: altDown });
+    const hovered = altDown && hoverId && hoverId !== target.id && !selectedIds.includes(hoverId)
       ? elements.find((e) => e.id === hoverId && e.visible !== false)
       : null;
-    if (hovered) measurements = measurements.concat(computePairMeasurements(measuredEl, hovered));
+    if (hovered) measurements = measurements.concat(computePairMeasurements(target, hovered));
   }
 
   /* ---------- Рендер ---------- */
@@ -1772,6 +2574,12 @@ export default function PassportEditor() {
           >
             🧲 Прилипание
           </button>
+          <button
+            onClick={fitAllTexts}
+            title="Убрать пустое место вокруг всех надписей — блок станет по размеру текста"
+          >
+            ⤢ По тексту
+          </button>
           <span className="pe-sep" />
           <button onClick={saveJSON} title="Ctrl+S">💾 JSON</button>
           <button onClick={() => jsonInputRef.current.click()}>📂 Загрузить</button>
@@ -1787,11 +2595,14 @@ export default function PassportEditor() {
           <LayersPanel
             elements={elements}
             selectedId={selectedId}
-            onSelect={(id) => { if (editingIdRef.current) commitEditing(); setSelectedId(id); }}
+            selectedIds={selectedIds}
+            onSelect={(id, e) => { if (editingIdRef.current) commitEditing(); selectWithModifiers(id, e, false); }}
             onToggleVisible={(el) => commitProps(el.id, { visible: el.visible === false })}
             onToggleLock={(el) => commitProps(el.id, { locked: !el.locked })}
             onMove={moveLayer}
             onRemove={removeLayer}
+            onReorder={reorderLayers}
+            onFitAll={fitAllTexts}
           />
 
           <div className="pe-canvas-wrap">
@@ -1804,7 +2615,8 @@ export default function PassportEditor() {
               </div>
 
               <div
-                className="pe-artboard"
+                ref={artboardRef}
+                className={`pe-artboard${marqueeActive ? ' is-selecting' : ''}`}
                 style={{ width: ARTBOARD_WIDTH, height: ARTBOARD_HEIGHT }}
                 onMouseDown={handleBackgroundMouseDown}
                 onMouseLeave={() => setHoverId(null)}
@@ -1813,14 +2625,14 @@ export default function PassportEditor() {
                 {guides.y !== null && <div className="pe-smart-guide pe-smart-guide-h" style={{ top: guides.y }} />}
 
                 {elements.map((el, idx) => {
-                  const isSelected = selectedId === el.id;
+                  const isSelected = selectedIds.includes(el.id);
                   const isEditing = editingId === el.id;
                   const isHovered = altDown && hoverId === el.id && !isSelected;
                   const blend = el.blendMode && el.blendMode !== 'normal' ? el.blendMode : undefined;
                   return (
                     <div
                       key={el.id}
-                      className={`pe-element pe-element--${el.type}${isSelected ? ' selected' : ''}${el.locked ? ' locked' : ''}${isHovered ? ' hovered' : ''}`}
+                      className={`pe-element pe-element--${el.type}${isSelected ? ' selected' : ''}${isSelected && isMulti ? ' multi' : ''}${isSelected && selectedId === el.id && isMulti ? ' anchor' : ''}${el.locked ? ' locked' : ''}${isHovered ? ' hovered' : ''}`}
                       style={{
                         left: el.x,
                         top: el.y,
@@ -1845,20 +2657,50 @@ export default function PassportEditor() {
                         innerRef={isEditing ? editingRef : null}
                         onBlur={isEditing ? commitEditing : undefined}
                         onKeyDown={isEditing ? handleEditorKeyDown : undefined}
+                        onInput={isEditing && el.type === 'text' ? handleEditorInput : undefined}
                         showPlaceholder
                       />
 
-                      {isSelected && !el.locked && HANDLES.map((h) => (
+                      {isSelected && !el.locked && !isMulti && HANDLES.map((h) => (
                         <div
                           key={h}
                           className={`pe-handle pe-handle-${h}`}
+                          title={el.type === 'text' ? 'Двойной клик — подогнать блок по тексту' : undefined}
                           onMouseDown={(e) => handleResizeStart(e, el, h)}
-                          onDoubleClick={(e) => e.stopPropagation()}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            if (el.type === 'text') fitSelected(HANDLE_AXES[h] || 'both');
+                          }}
                         />
                       ))}
                     </div>
                   );
                 })}
+
+                {groupBox && (
+                  <div
+                    className="pe-group-box"
+                    style={{ left: groupBox.x, top: groupBox.y, width: groupBox.width, height: groupBox.height }}
+                  >
+                    {HANDLES.map((h) => (
+                      <div
+                        key={h}
+                        className={`pe-handle pe-handle-${h}`}
+                        title="Растянуть всю группу"
+                        onMouseDown={(e) => handleGroupResizeStart(e, groupBox, h)}
+                        onDoubleClick={(e) => e.stopPropagation()}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {marquee && (
+                  <div
+                    className="pe-marquee"
+                    style={{ left: marquee.x, top: marquee.y, width: marquee.width, height: marquee.height }}
+                  />
+                )}
 
                 <MeasureOverlay items={measurements} />
 
@@ -1878,13 +2720,19 @@ export default function PassportEditor() {
           </div>
 
           <PropsPanel
-            el={selectedEl}
-            onLive={(props) => selectedEl && liveMap(selectedEl.id, (el) => ({ ...el, ...props }))}
-            onCommit={(props) => selectedEl && commitProps(selectedEl.id, props)}
+            el={isMulti ? null : selectedEl}
+            group={isMulti ? { count: selectedEls.length, box: groupBox, elements: selectedEls } : null}
+            onLive={(props) => selectedEl && liveProps(selectedEl.id, props)}
+            onCommit={(props) => selectedEl && commitPropsAuto(selectedEl.id, props)}
             onSessionStart={beginSession}
             onSessionEnd={endSession}
             onDuplicate={duplicateSelected}
             onDelete={deleteSelected}
+            onFit={fitSelected}
+            onFitToggle={toggleFit}
+            onFitGroup={fitSelectedTexts}
+            onAlign={alignSelected}
+            onClearSelection={clearSelection}
           />
         </div>
       </div>
@@ -1944,10 +2792,31 @@ body { margin: 0; }
 .pe-hint { font-size: 11px; color: #888; line-height: 1.5; }
 .pe-hint-list { margin: 8px 0 0; padding-left: 16px; font-size: 11px; color: #888; line-height: 1.7; }
 .pe-muted { color: #999; font-weight: 400; font-size: 12px; }
+.pe-info { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; background: #f5f5f5; border: 1px solid #e2e2e2; border-radius: 4px; padding: 3px 6px; font-size: 11px; }
+.pe-info span { color: #8a8a8a; }
+.pe-info b { font-variant-numeric: tabular-nums; }
+.pe-wide-btn { width: 100%; margin-bottom: 6px; }
 
-.pe-layer-row { display: flex; align-items: center; gap: 2px; padding: 3px 2px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+.pe-layer-row { position: relative; display: flex; align-items: center; gap: 2px; padding: 3px 2px; border-radius: 4px; cursor: pointer; font-size: 12px; }
 .pe-layer-row:hover { background: #e8e8e8; }
 .pe-layer-row.selected { background: #cfe4ff; }
+.pe-layer-row.anchor { box-shadow: inset 2px 0 0 #2d8cf0; }
+.pe-layer-row.dragging { opacity: .4; background: #eaf3ff; }
+.pe-layers-list.is-dragging .pe-layer-row { cursor: ns-resize; }
+/* Синяя линия показывает, куда встанет перетаскиваемый слой */
+.pe-layer-row.drop-before::before,
+.pe-layer-row.drop-after::after {
+  content: ''; position: absolute; left: 0; right: 0; height: 2px;
+  background: #2d8cf0; border-radius: 2px; pointer-events: none;
+}
+.pe-layer-row.drop-before::before { top: -1px; }
+.pe-layer-row.drop-after::after { bottom: -1px; }
+.pe-grip { flex-shrink: 0; padding: 0 2px; color: #b0b0b0; font-size: 11px; line-height: 1; cursor: grab; user-select: none; }
+.pe-grip:hover { color: #4a4a4a; }
+.pe-grip:active { cursor: grabbing; }
+.pe-count-sel { background: #2d8cf0; color: #fff; }
+.pe-head-btn { margin-left: auto; font-size: 13px; }
+.pe-layers-hint { margin-top: 8px; padding-top: 6px; border-top: 1px solid #e6e6e6; }
 .pe-layer-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 4px; }
 .pe-layer-type { display: inline-block; width: 14px; color: #999; font-size: 11px; text-align: center; }
 .pe-layer-badge { font-size: 9px; color: #7b5cd6; background: #efeaff; border-radius: 3px; padding: 1px 4px; flex-shrink: 0; max-width: 74px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1966,8 +2835,22 @@ body { margin: 0; }
 .pe-element.selected { box-shadow: 0 0 0 1px #2d8cf0; }
 .pe-element.selected.locked { box-shadow: 0 0 0 1px #e74c3c; }
 .pe-element.hovered { box-shadow: 0 0 0 1px #e8590c; }
+/* Групповое выделение: тонкая рамка у каждого слоя, жирная — у активного */
+.pe-element.selected.multi { box-shadow: 0 0 0 1px rgba(45,140,240,.55); }
+.pe-element.selected.multi.anchor { box-shadow: 0 0 0 2px #2d8cf0; }
+.pe-element.selected.multi.locked { box-shadow: 0 0 0 1px rgba(231,76,60,.6); }
+
+/* Общая рамка группы с маркерами масштабирования */
+.pe-group-box { position: absolute; z-index: 9900; pointer-events: none; box-shadow: 0 0 0 1px #2d8cf0; }
+.pe-group-box .pe-handle { pointer-events: auto; }
+
+/* Рамка выделения мышью по фону листа */
+.pe-marquee { position: absolute; z-index: 9950; pointer-events: none; background: rgba(45,140,240,.12); border: 1px solid #2d8cf0; }
+.pe-artboard.is-selecting { cursor: crosshair; user-select: none; }
 
 .pe-text-content { width: 100%; height: 100%; outline: none; white-space: pre-wrap; word-break: break-word; overflow: hidden; }
+/* Пока идёт правка, блок подсвечен и текст не обрезается — даже если он длиннее рамки */
+.pe-text-content.is-editing { overflow: visible; background: #fffbe8; box-shadow: inset 0 0 0 1px #f0c36d; caret-color: #2d8cf0; }
 
 /* Поле для ввода текста (бланк с подчёркиванием) */
 .pe-field-content {
