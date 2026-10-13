@@ -1,16 +1,65 @@
-# React + Vite
+# Passport Editor
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Редактор паспорта изделия: холст-«лист» 650×1000 px, слои, текст/линии/изображения,
+умное выравнивание и **печать на листе A4**.
 
-Currently, two official plugins are available:
+Весь код приложения находится в **одном файле — [`src/app.js`](src/app.js)**
+(логика, компоненты, стили, печать, экспорт PDF). `index.html` подключает именно его.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Запуск
 
-## React Compiler
+```bash
+npm install     # поставить node-модули
+npm run dev     # дев-сервер (http://localhost:5173)
+npm run build   # прод-сборка в dist/
+npm run preview # предпросмотр сборки
+npm run lint    # eslint
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Что умеет
 
-## Expanding the ESLint configuration
+### Отступы и выравнивание, как в Figma
+- **Умные направляющие**: при перетаскивании и растягивании элемент прилипает
+  к краям и центрам других элементов, а также **к краям и центру листа**
+  (порог 6 px). `Ctrl` временно отключает прилипание.
+- **Линии отступов**: у выбранного элемента красными линиями с подписями
+  показываются расстояния **до краёв листа** (слева / сверху / справа / снизу).
+  Значения видны и во время перетаскивания — вместе с бейджем текущих координат.
+- **Отступы до соседей**: удерживайте `Alt` — появятся оранжевые линии
+  до ближайших элементов с каждой стороны; `Alt` + наведение на конкретный
+  элемент покажет расстояние именно до него.
+- В панели свойств дублируется схема отступов от края листа в px и в мм.
+- Кнопки `📏 Отступы` и `🧲 Прилипание` в тулбаре включают/выключают режимы.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+### Печать на листе A4
+- Кнопка **«Печать A4»** (или `Ctrl+P`) открывает диалог с живым предпросмотром листа.
+- Формат: **A4**, A3, A5, Letter; ориентация книжная/альбомная; поля листа в мм.
+- Масштаб документа: *вписать в лист*, *заполнить лист*, *100 %* или *свой %*.
+  Диалог показывает размер листа, область печати, итоговый масштаб и предупреждает,
+  если документ выходит за область печати.
+- Печатается отдельный «чистовик» без интерфейса: `@page` с точным размером листа
+  и нулевыми полями браузера, геометрия пересчитывается в миллиметрах.
+  В диалоге печати браузера выбирайте поля «Нет» и масштаб 100 %.
+- **«Скачать PDF»** собирает тот же лист в PDF (модули `jspdf` + `html2canvas`,
+  рендер ≈288 dpi).
+
+### Прочее
+- Слои: видимость, блокировка, порядок, удаление; свойства текста
+  (шрифт, размер, цвет, начертание, выравнивание, межстрочный интервал).
+- Двойной клик по тексту — редактирование на месте; стрелки — сдвиг на 1 px
+  (`Shift` — 10 px); `Ctrl+Z` / `Ctrl+Shift+Z` — отмена и повтор.
+- Сохранение и загрузка макета в JSON (`Ctrl+S` — сохранить), вместе с настройками печати.
+- Настройки печати и режимы интерфейса запоминаются в `localStorage`.
+
+## Node-модули
+
+| Пакет | Зачем |
+| --- | --- |
+| `react`, `react-dom` | интерфейс |
+| `jspdf` | экспорт листа A4 в PDF |
+| `html2canvas` | рендер страницы в растр для PDF |
+| `vite`, `@vitejs/plugin-react` | сборка и дев-сервер |
+| `eslint` + плагины | проверка кода |
+
+Так как код лежит в файле `.js`, а не `.jsx`, в `vite.config.js` включена поддержка
+JSX для `.js` (опции `oxc`, `moduleTypes` и небольшой плагин `jsx-in-js`).
