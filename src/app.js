@@ -370,36 +370,36 @@ function computeResizeSnapped(handle, orig, dx, dy, allElements, skipId, thresho
   let guideX = null;
   let guideY = null;
 
+  // Прилипание принимаем, только если оно не «схлопывает» элемент
+  // (иначе тонкая линия у края листа могла превратиться в 0.5 px).
   if (handle.includes('e')) {
     const t = nearestLine(targets.x, box.x + box.width, threshold);
-    if (t !== null) {
-      box.width = Math.max(min, t - box.x);
+    if (t !== null && t - box.x >= min) {
+      box.width = t - box.x;
       guideX = t;
     }
   } else if (handle.includes('w')) {
     const right = orig.x + orig.width;
     const t = nearestLine(targets.x, box.x, threshold);
-    if (t !== null) {
-      const w = Math.max(min, right - t);
-      box.x = right - w;
-      box.width = w;
+    if (t !== null && right - t >= min) {
+      box.width = right - t;
+      box.x = t;
       guideX = t;
     }
   }
 
   if (handle.includes('s')) {
     const t = nearestLine(targets.y, box.y + box.height, threshold);
-    if (t !== null) {
-      box.height = Math.max(min, t - box.y);
+    if (t !== null && t - box.y >= min) {
+      box.height = t - box.y;
       guideY = t;
     }
   } else if (handle.includes('n')) {
     const bottom = orig.y + orig.height;
     const t = nearestLine(targets.y, box.y, threshold);
-    if (t !== null) {
-      const h = Math.max(min, bottom - t);
-      box.y = bottom - h;
-      box.height = h;
+    if (t !== null && bottom - t >= min) {
+      box.height = bottom - t;
+      box.y = t;
       guideY = t;
     }
   }
@@ -608,7 +608,7 @@ function ElementInner({ el, kf = 1, editing = false, innerRef = null, onBlur = n
         suppressContentEditableWarning
         onBlur={onBlur}
         onKeyDown={onKeyDown}
-        className={`pe-field-content${empty ? ' is-empty' : ''}${editing ? ' is-editing' : ''}`}
+        className={`pe-field-content${empty && !editing ? ' is-empty' : ''}${editing ? ' is-editing' : ''}`}
         data-placeholder={showPlaceholder && empty ? (el.placeholder || 'Введите текст') : undefined}
         style={{
           fontSize: el.fontSize * kf,
